@@ -111,6 +111,19 @@ residue names (PDB, GRO or `Structure.from_atoms` with `resnames=`); a name
 that is not in the structure, or whose atoms include no hydrogen, is an error.
 `structure.deuterated(['CTA'])` returns the same change as a new structure.
 
+## Examples
+
+[`examples/`](examples/) holds seven runnable scripts, each checked against
+an analytic result where one exists: C60 from a PDB file, contrast matching
+of a core-shell particle of SLD pixels, a CTA micelle from a GROMACS frame in
+four contrasts, a hexahedral VTK mesh, structures built from arrays, size
+polydispersity with CSV and `Data1D` output, and settings records replayed in
+worker processes. See [`examples/README.md`](examples/README.md).
+
+```bash
+python examples/02_core_shell_contrast.py
+```
+
 ## File formats
 
 Positions are in Å and SLDs in Å⁻² in all four (a `.gro` file's nm are converted).
@@ -204,6 +217,12 @@ coords2sans.
   `'average'` reproduces SasView's `is_avg=True` and suits round aggregates
   above about 10⁵ atoms. `calculate(progress=...)` can report progress or
   stop the pair passes of `'histogram'` and `'pairs'`.
+  The amplitudes of `'average'` are taken about the bounding-box centre, as
+  SasView's `transform_center` does; for a lopsided aggregate the centre of
+  scattering length would be more natural, and the profile's note records
+  the centre used. `'lattice'` refuses grids above 8 million zero-padded
+  cells; that cap counts cells, not bytes, and at it the FFTs peak near
+  400 MB.
 - **Contrast series are cheap.** The lattice, histogram and average kernels
   keep the scattering lengths and the volumes apart in their distance
   spectrum, so the calculator keeps the last one and a new `sld_solvent`,
@@ -217,8 +236,12 @@ coords2sans.
 - **Reproducibility.** `gsc.get_settings()` records the file path and
   SHA-256, the reader options, the q grid, every parameter and the package
   versions. `GenericScatteringCalculator.from_settings(settings)` rebuilds
-  the calculator and warns if the file or the periodictable version changed;
-  records of version 0.1 replay with the new parameters at their defaults,
+  the calculator and warns if the file or the periodictable version changed.
+  The path is recorded relative to the working directory, or to
+  `get_settings(root=...)`, with `/` separators, and resolved against
+  `from_settings(settings, root=...)`, so a record survives a move of the
+  project; the hash shows whether the file is the same. Records
+  of version 0.1 replay with the new parameters at their defaults,
   except the kernel: `'auto'` for pixels on a lattice and otherwise
   `'pairs'`, the pair sum 0.1 used, so a record gives the curve it was
   made with.
@@ -234,8 +257,16 @@ coords2sans.
   JSON, so another process can run it:
   `GenericScatteringCalculator.from_settings(settings).calculate_series(series)`.
   Call `sinccity.set_verbosity('quiet')` there; the logger is per process.
-- **Console output.** Progress lines go through the `sinccity` logger;
-  `sinccity.set_verbosity('quiet')` silences them.
+- **Notes.** What a reader dropped or assumed and what a calculation warns
+  about are `Diagnostic` records in `structure.notes` and `profile.notes`:
+  each is its text as a string, with a `severity` (`'warning'` or `'info'`)
+  and an `origin` (`'read_pdb'`, `'load'`, `'calculate'`, ...). Each is
+  reported once, where it is made: warnings as a `UserWarning` at your line,
+  info notes as log lines. A reader's notes are reported when the file is
+  read, not again when the structure is installed.
+- **Console output.** Progress lines and info notes go through the
+  `sinccity` logger; `sinccity.set_verbosity('quiet')` silences them and
+  `set_verbosity('error')` the warnings too.
 
 ## Coming from coords2sans
 
@@ -271,5 +302,7 @@ pytest tests
 
 ## Licence
 
-BSD 3-Clause, like IQuana. The test structures in `tests/data/` are
-SasView test data, BSD 3-Clause, Copyright (c) 2009-2026, SasView Developers.
+BSD 3-Clause, like IQuana. `c60.pdb` and `five_tetrahedra_cube.vtk` in
+`tests/data/` are SasView test data, BSD 3-Clause, Copyright (c) 2009-2026,
+SasView Developers. The other structures there are synthetic, written by
+`tests/data/make_example_files.py`.

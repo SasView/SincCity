@@ -37,6 +37,20 @@ the q grid, every parameter and the package versions.
 `GenericScatteringCalculator.from_settings(settings)` rebuilds the calculator
 and warns if the file or the periodictable version changed.
 
+The path is relative to the working directory, with `/` separators, so a
+record replays after the project moves or on another machine; the SHA-256
+shows whether the file is the same. When the replaying process runs
+elsewhere, state the root on both sides:
+
+```python
+settings = gsc.get_settings(root='/home/me/project')  # source: 'data/micelle.gro'
+# on the cluster, where the project lives elsewhere
+gsc = GenericScatteringCalculator.from_settings(settings, root='/scratch/project')
+```
+
+A file on another drive than the root (Windows) is recorded by its absolute
+path. Records of version 0.2, which hold absolute paths, replay as they are.
+
 Records of version 0.1 replay with the new parameters at their defaults,
 except the kernel: `'auto'` for pixels on a lattice and otherwise `'pairs'`,
 the pair sum 0.1 used, so a record gives the curve it was made with.

@@ -7,7 +7,7 @@ import numpy as np
 import periodictable
 from periodictable import formula, nsf
 
-from .model import StructureError
+from ._base import StructureError
 
 #: Avogadro constant, 1/mol (the value SasView uses).
 AVOGADRO = 6.02214129e23

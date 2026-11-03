@@ -17,7 +17,11 @@ Example:
     >>> data = profile.to_data1d()          # a Data1D for IQuana.set_data
 """
 
-__version__ = '0.2.0'
+from ._base import Diagnostic, package_version
+
+# pyproject.toml is the one place the version is written; a source tree that
+# was never installed has none.
+__version__ = package_version('SincCity') or '0+unknown'
 
 from ._console import set_verbosity
 from .calculator import GenericScatteringCalculator, ScatteringProfile
@@ -27,6 +31,7 @@ from .readers import load, read_gro, read_pdb, read_sld, read_vtk
 
 __all__ = [
     'CalculationInterrupted',
+    'Diagnostic',
     'DistanceSpectrum',
     'GenericScatteringCalculator',
     'RgResult',

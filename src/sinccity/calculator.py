@@ -3,8 +3,8 @@
 import copy
 import html
 import os
+import pathlib
 import time
-import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -12,7 +12,14 @@ from typing import Any
 import numpy as np
 
 from . import __version__
-from ._console import ANGSTROM, CUBIC_ANGSTROM, INVERSE_ANGSTROM, OK, SLD_UNIT, logger
+from ._base import (
+    PROTEIN_SPECIFIC_VOLUME,
+    Diagnostic,
+    StructureError,
+    package_version,
+    residue_names,
+)
+from ._console import ANGSTROM, CUBIC_ANGSTROM, INVERSE_ANGSTROM, OK, SLD_UNIT, emit, logger
 from .debye import (
     LATTICE_MAX_CELLS,
     CalculationInterrupted,
@@ -24,7 +31,7 @@ from .debye import (
 )
 from .dispersion import gaussian_sizes
 from .elements import AVOGADRO
-from .model import PROTEIN_SPECIFIC_VOLUME, Structure, StructureError, residue_names
+from .model import Structure
 from .readers import load
 
 #: SasView's default 1D grid: 30 log-spaced points up to 0.3 1/Å.
@@ -93,10 +100,13 @@ def _check_param(name: str, value: Any) -> Any:
         if not np.isfinite(value):
             raise ValueError(f'sld_solvent must be finite, got {value}.')
         if 0 < abs(value) < 1e-3:
-            warnings.warn(
-                f'sld_solvent={value:g} is in 10^-6 Ang^-2 and looks like a value in Ang^-2. '
-                f'Did you mean {value * 1e6:g}?',
-                stacklevel=4,
+            emit(
+                Diagnostic(
+                    f'sld_solvent={value:g} is in 10^-6 Ang^-2 and looks like a value in '
+                    f'Ang^-2. Did you mean {value * 1e6:g}?',
+                    'warning',
+                    'set_params',
+                )
             )
         return value
     if name in ('normalisation_volume', 'histogram_bin'):
@@ -137,13 +147,23 @@ def validate_q_grid(q: Any) -> np.ndarray:
     return q_values
 
 
-def _package_version(name: str) -> str | None:
-    try:
-        from importlib.metadata import version
+def _note(notes: list[Diagnostic], text: str, severity: str = 'warning') -> None:
+    """Record a calculation diagnostic in *notes* and report it once."""
+    diagnostic = Diagnostic(text, severity, 'calculate')
+    notes.append(diagnostic)
+    emit(diagnostic)
 
-        return version(name)
-    except Exception:  # noqa: BLE001 - a missing distribution must not block a settings record
-        return None
+
+def _settings_path(path: str, root) -> str:
+    """*path* relative to *root* (the working directory when None), with ``/`` separators.
+
+    A path with no relative form (another drive on Windows) stays absolute.
+    """
+    root = os.path.abspath(os.getcwd() if root is None else os.fspath(root))
+    try:
+        return pathlib.Path(os.path.relpath(path, root)).as_posix()
+    except ValueError:
+        return path
 
 
 def _q_grid(qmin: float, qmax: float, npoints: int, spacing: str) -> np.ndarray:
@@ -175,7 +195,9 @@ class ScatteringProfile:
         n_sizes: Number of size factors summed (1 without polydispersity).
         label: The curve's name; the structure file's name unless given.
         deuterated: The residue names whose hydrogens counted as D.
-        notes: Warnings raised while reading and calculating.
+        notes: ``Diagnostic`` records: the structure's own (the same records
+            as ``structure.notes``), then those of the calculation (origin
+            ``'calculate'``).
         elapsed: Calculation time, s.
     """
 
@@ -199,6 +221,7 @@ class ScatteringProfile:
             array = np.array(getattr(self, name), dtype=float, copy=True)
             array.setflags(write=False)
             object.__setattr__(self, name, array)
+        object.__setattr__(self, 'notes', tuple(Diagnostic.of(note) for note in self.notes))
 
     @property
     def params(self) -> dict[str, Any]:
@@ -397,12 +420,11 @@ class GenericScatteringCalculator:
         self._install(structure)
 
     def _install(self, structure: Structure) -> None:
+        # The structure's notes were reported when it was read; they are not repeated.
         self._structure = structure
         self._params['normalisation_volume'] = 'auto'
         self._profile = None
         self._cache = None
-        for note in structure.notes:
-            warnings.warn(f'{os.path.basename(structure.source)}: {note}', stacklevel=3)
         rg = structure.radius_of_gyration('sld', sld_solvent=self._params['sld_solvent'])
         detail = (
             f'Rg {rg.value:.3g} {ANGSTROM}' if np.isfinite(rg.value) else f'Rg n/a ({rg.reason})'
@@ -471,8 +493,9 @@ class GenericScatteringCalculator:
                 ``'histogram'``. ``'lattice'``: FFT autocorrelation, exact.
                 ``'histogram'``: pairs counted by distance, exact to about
                 1e-4. ``'average'``: the squared orientation-averaged amplitude
-                about the bounding-box centre, exact only for spherically
-                symmetric structures, with time linear in the points.
+                about the bounding-box centre (SasView's choice; the profile's
+                note gives it), exact only for spherically symmetric
+                structures, with time linear in the points.
                 ``'pairs'``: every pair at every q, exact to the last digit.
             histogram_bin: Bin width of the histogram kernel, Å, or ``'auto'``
                 for ``min(0.01, 1e-3 / (q_max * f_max))``, f_max the largest
@@ -635,7 +658,7 @@ class GenericScatteringCalculator:
         factors, shares = self._sizes(p)
 
         if not active.any():
-            self._warn(
+            _note(
                 notes,
                 f'Every point matches the solvent SLD ({p["sld_solvent"]:g}); I(q) is the background.',
             )
@@ -660,7 +683,7 @@ class GenericScatteringCalculator:
             'n_points': structure.n_points,
             'reader_options': copy.deepcopy(structure.reader_options),
             'element_sources': dict(structure.element_sources),
-            'notes': list(structure.notes),
+            'notes': structure.notes,  # the structure's records themselves, not a copy
         }
         profile = ScatteringProfile(
             q=q,
@@ -685,17 +708,12 @@ class GenericScatteringCalculator:
         )
         return profile
 
-    @staticmethod
-    def _warn(notes: list[str], text: str) -> None:
-        warnings.warn(text, stacklevel=5)
-        notes.append(text)
-
-    def _check(self, structure: Structure, contrast, active, f_max, notes: list[str]) -> None:
+    def _check(self, structure: Structure, contrast, active, f_max, notes: list) -> None:
         """Warnings that change how the curve should be read."""
         largest = np.abs(contrast).max()
         near = active & (np.abs(contrast) <= NEAR_MATCH * largest)
         if near.any():
-            self._warn(
+            _note(
                 notes,
                 f'{int(near.sum())} points almost match the solvent (|contrast| <= '
                 f'{NEAR_MATCH:g} of the largest) but still count towards V_norm. Set '
@@ -712,7 +730,7 @@ class GenericScatteringCalculator:
             size = float(structure.cell_diameter.max() / np.sqrt(3))
         q_max = self._q[-1] * f_max  # the largest size samples the spectrum furthest out
         if size and q_max * size > CELL_SIZE_LIMIT:
-            self._warn(
+            _note(
                 notes,
                 f'q_max * cell size = {q_max * size:.3g} > {CELL_SIZE_LIMIT:g} (cell size '
                 f'{size:.4g} Ang, largest size factor {f_max:.3g}): treating each '
@@ -725,7 +743,7 @@ class GenericScatteringCalculator:
             protein = float(
                 structure.masses[active].sum() * PROTEIN_SPECIFIC_VOLUME / AVOGADRO * 1e24
             )
-            self._warn(
+            _note(
                 notes,
                 f'Atomic volumes come from elemental densities: {elemental:.4g} Ang^3 in total, '
                 f'{elemental / protein:.2f} times a protein-like estimate ({protein:.4g} Ang^3 at '
@@ -791,13 +809,13 @@ class GenericScatteringCalculator:
 
         if kernel == 'pairs':
             if n > LARGE_PAIR_LOOP:
-                self._warn(
+                _note(
                     notes,
                     f'{n} scattering points: the exact pair sum scales as N^2 and may take many '
                     "minutes; kernel='histogram' gives the same to about 1e-4 in a fraction of it.",
                 )
             if factors.size > 1:
-                self._warn(
+                _note(
                     notes,
                     f"kernel='pairs' repeats the whole pair sum for each of the {factors.size} "
                     "sizes; kernel='histogram' does the same in a fraction of the time.",
@@ -810,9 +828,13 @@ class GenericScatteringCalculator:
                 )
             ), None
         if kernel == 'average':
-            notes.append(
-                '<A>^2 kernel: exact only for spherically symmetric structures; the result '
-                'depends on the centre.'
+            centre = ', '.join(f'{c:.4g}' for c in structure.centre)
+            _note(
+                notes,
+                '<A>^2 kernel: exact only for spherically symmetric structures; amplitudes are '
+                f'taken about the bounding-box centre ({centre}) Ang, as SasView does, and the '
+                'result depends on that choice.',
+                'info',
             )
         spectrum, bin_width = self._spectrum(kernel, structure, sld, active, report, notes)
         return over_sizes(lambda i, f: spectrum.debye(f * q, rho)), bin_width
@@ -844,7 +866,7 @@ class GenericScatteringCalculator:
             spectrum = spectrum_lattice(grid_b, grid_v, structure.lattice.step)
         elif kernel == 'histogram':
             if xyz.shape[0] > LARGE_HISTOGRAM:
-                self._warn(
+                _note(
                     notes,
                     f'{xyz.shape[0]} scattering points: the histogram pass scales as N^2 and may '
                     "take minutes; kernel='average' suits round aggregates.",
@@ -884,17 +906,28 @@ class GenericScatteringCalculator:
 
     # ------------------------------------------------------------ settings
 
-    def get_settings(self) -> dict[str, Any]:
+    def get_settings(self, *, root: str | os.PathLike | None = None) -> dict[str, Any]:
         """A JSON-serialisable record of the source, grid, parameters and versions.
+
+        The file is recorded by its path relative to *root*, with ``/``
+        separators, so the record still replays after the project moves or on
+        another machine; the SHA-256 shows whether it is the same file. Replay
+        with the same root: ``from_settings(settings, root=...)``.
 
         A structure no reader made (``from_arrays``, or a copy derived from a
         file) is recorded as ``'in-memory'``, which ``from_settings`` refuses;
         a derived copy also records ``derived_from``, for information only.
+
+        Args:
+            root: The directory the path is relative to; the working directory
+                when None. A file on another drive is recorded by its absolute
+                path.
         """
         structure = self._require_structure()
         replayable = structure.reader_options is not None
+        source = _settings_path(structure.source, root)
         settings = {
-            'source': structure.source if replayable else 'in-memory',
+            'source': source if replayable else 'in-memory',
             'basename': os.path.basename(structure.source),
             'source_sha256': structure.source_sha256,
             'reader_options': copy.deepcopy(structure.reader_options),
@@ -903,32 +936,48 @@ class GenericScatteringCalculator:
             'params': dict(self._params),
             'versions': {
                 'sinccity': __version__,
-                **{name: _package_version(name) for name in ('numpy', 'periodictable')},
+                **{name: package_version(name) for name in ('numpy', 'periodictable')},
             },
         }
         if not replayable and structure.source != 'in-memory':
-            settings['derived_from'] = structure.source
+            settings['derived_from'] = source
         return settings
 
     @classmethod
-    def from_settings(cls, settings: dict[str, Any]) -> 'GenericScatteringCalculator':
-        """Rebuild a calculator from ``get_settings()``, warning about what changed."""
+    def from_settings(
+        cls, settings: dict[str, Any], *, root: str | os.PathLike | None = None
+    ) -> 'GenericScatteringCalculator':
+        """Rebuild a calculator from ``get_settings()``, warning about what changed.
+
+        Args:
+            settings: The record.
+            root: The directory a relative source path is relative to; the
+                working directory when None. An absolute path, as records
+                before 0.3 hold, is used as it is.
+        """
         if settings['source'] == 'in-memory':
             raise ValueError('These settings describe an in-memory structure; use set_structure().')
+        base = os.getcwd() if root is None else os.fspath(root)
+        path = os.path.join(os.path.abspath(base), settings['source'])
         calculator = cls()
-        structure = calculator.load_structure(
-            settings['source'], **(settings.get('reader_options') or {})
-        )
+        structure = calculator.load_structure(path, **(settings.get('reader_options') or {}))
         if structure.source_sha256 != settings['source_sha256']:
-            warnings.warn(
-                f'{settings["source"]} has changed since the settings were saved.', stacklevel=2
+            emit(
+                Diagnostic(
+                    f'{settings["source"]} has changed since the settings were saved.',
+                    'warning',
+                    'from_settings',
+                )
             )
         saved = settings['versions'].get('periodictable')
-        if saved and saved != _package_version('periodictable'):
-            warnings.warn(
-                f'periodictable {saved} was used for the saved settings; scattering lengths '
-                'and densities may differ in this version.',
-                stacklevel=2,
+        if saved and saved != package_version('periodictable'):
+            emit(
+                Diagnostic(
+                    f'periodictable {saved} was used for the saved settings; scattering lengths '
+                    'and densities may differ in this version.',
+                    'warning',
+                    'from_settings',
+                )
             )
         if settings.get('q_grid'):
             calculator.set_q_grid(**settings['q_grid'])

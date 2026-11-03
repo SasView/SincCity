@@ -8,17 +8,25 @@ SasView Developers), with the deviations documented in the package README: the
 VTK cell geometry is recomputed, because SasView's volumes for hexahedra,
 wedges and pyramids are wrong. The GRO reader and the residue options follow
 coords2sans.
+
+What a reader drops, approximates or assumes becomes a ``Diagnostic`` in the
+structure's ``notes``, and each reader reports its notes once, as they are
+made: warnings as a ``UserWarning``, the rest as log lines. Installing the
+structure in a calculator later reports nothing again.
 """
 
 import dataclasses
+import functools
 import hashlib
 import os
 from collections import Counter
 
 import numpy as np
 
+from ._base import Diagnostic, StructureError, residue_names
+from ._console import emit
 from .elements import guess_pdb, sld_volume
-from .model import Structure, StructureError, detect_lattice, residue_names
+from .model import Structure, detect_lattice
 from .molecules import assign_elements, unwrap_box
 
 #: Residue names of water, which the PDB reader drops unless ``residues`` is given.
@@ -37,6 +45,21 @@ def _hash_file(path: str) -> str | None:
         return None
 
 
+def _makers(origin: str):
+    """The ``info`` and ``warning`` note makers of the reader *origin*."""
+    return (
+        functools.partial(Diagnostic, severity='info', origin=origin),
+        functools.partial(Diagnostic, severity='warning', origin=origin),
+    )
+
+
+def _reported(structure: Structure) -> Structure:
+    """*structure*, after its notes are reported once; how every reader returns."""
+    for note in structure.notes:
+        emit(note, os.path.basename(structure.source))
+    return structure
+
+
 def load(
     path,
     *,
@@ -48,7 +71,7 @@ def load(
 ) -> Structure:
     """Read a structure file, choosing the reader by extension.
 
-    Options a format does not have are ignored with a note.
+    Options a format does not have are ignored with a warning note.
 
     Args:
         path: A ``.pdb``, ``.gro``, ``.sld`` (or ``.txt``) or ``.vtk`` file.
@@ -80,7 +103,10 @@ def load(
     structure = reader(path, **{k: v for k, v in options.items() if k in accepted})
     ignored = [k for k, v in options.items() if k not in accepted and v != load.__kwdefaults__[k]]
     if ignored:
-        note = f'Ignored {", ".join(ignored)}: not an option for {extension} files.'
+        note = Diagnostic(
+            f'Ignored {", ".join(ignored)}: not an option for {extension} files.', 'warning', 'load'
+        )
+        emit(note, os.path.basename(structure.source))
         structure = dataclasses.replace(structure, notes=(*structure.notes, note))
     return structure
 
@@ -108,8 +134,9 @@ def _residue_options(residues, masses, elements, unwrap) -> dict:
     }
 
 
-def _periodic(path, lengths, triclinic: bool, unwrap, default: bool, notes: list[str]):
+def _periodic(path, lengths, triclinic: bool, unwrap, default: bool, notes: list, origin: str):
     """The box to store, and whether to unwrap across it."""
+    info, warning = _makers(origin)
     wanted = default if unwrap == 'auto' else unwrap
     if lengths is None:
         if unwrap is True:
@@ -118,7 +145,7 @@ def _periodic(path, lengths, triclinic: bool, unwrap, default: bool, notes: list
                 'placeholder with a side of 1 Ang or less.'
             )
         if wanted:
-            notes.append('The file declares no periodic box, so nothing is unwrapped.')
+            notes.append(warning('The file declares no periodic box, so nothing is unwrapped.'))
         return None, False
     if triclinic:
         if wanted:
@@ -126,7 +153,7 @@ def _periodic(path, lengths, triclinic: bool, unwrap, default: bool, notes: list
                 f'{path}: the periodic box is triclinic and only rectangular boxes can be '
                 'unwrapped; pass unwrap=False.'
             )
-        notes.append('The periodic box is triclinic; it is not stored.')
+        notes.append(info('The periodic box is triclinic; it is not stored.'))
         return None, False
     return tuple(float(length) for length in lengths), wanted
 
@@ -149,13 +176,14 @@ def _atoms(
     **fields,
 ) -> Structure:
     """The atom structure the PDB and GRO readers return, after the residue steps."""
+    info, warning = _makers(f'read_{format_}')
     resids, resnames, names = np.asarray(resids), np.asarray(resnames), np.asarray(names)
     try:
         if unwrap:
             xyz, moved = unwrap_box(resids, resnames, xyz, box)
             if moved:
                 notes.append(
-                    f'Unwrapped the aggregate across the periodic box: moved {moved} atoms.'
+                    info(f'Unwrapped the aggregate across the periodic box: moved {moved} atoms.')
                 )
         symbols, sources, note = assign_elements(
             resids,
@@ -167,27 +195,29 @@ def _atoms(
             guesses,
         )
         if note:
-            notes.append(note)
+            notes.append(warning(note))
         sld, volume = sld_volume(symbols)
     except StructureError as exc:
         raise StructureError(f'{path}: {exc}') from exc
-    return Structure(
-        'atoms',
-        xyz,
-        sld,
-        volume,
-        symbols=symbols,
-        resids=resids,
-        resnames=resnames,
-        names=names,
-        element_sources=sources,
-        box=box,
-        reader_options=options,
-        source=path,
-        source_sha256=sha,
-        format=format_,
-        notes=tuple(notes),
-        **fields,
+    return _reported(
+        Structure(
+            'atoms',
+            xyz,
+            sld,
+            volume,
+            symbols=symbols,
+            resids=resids,
+            resnames=resnames,
+            names=names,
+            element_sources=sources,
+            box=box,
+            reader_options=options,
+            source=path,
+            source_sha256=sha,
+            format=format_,
+            notes=tuple(notes),
+            **fields,
+        )
     )
 
 
@@ -310,25 +340,32 @@ def read_pdb(
         if other in index_of
     ]
 
+    info, warning = _makers('read_pdb')
     notes = []
     if models > 1:
-        notes.append(f'Read the first of {models} models.')
+        notes.append(info(f'Read the first of {models} models.'))
     if dropped_het:
         listed = ', '.join(f'{name} x{count}' for name, count in sorted(dropped_het.items()))
         notes.append(
-            f'Skipped {sum(dropped_het.values())} HETATM records ({listed}); '
-            'pass include_hetatm=True to read them.'
+            warning(
+                f'Skipped {sum(dropped_het.values())} HETATM records ({listed}); '
+                'pass include_hetatm=True to read them.'
+            )
         )
     if dropped_water:
-        notes.append(f'Skipped {dropped_water} water atoms.')
+        notes.append(info(f'Skipped {dropped_water} water atoms.'))
     if dropped_altloc:
-        notes.append(f'Kept alternate location {altloc_kept!r}; skipped {dropped_altloc} atoms.')
+        notes.append(
+            info(f'Kept alternate location {altloc_kept!r}; skipped {dropped_altloc} atoms.')
+        )
     if partial_occupancy:
-        notes.append('Some atoms have occupancy below 1; occupancy is not applied.')
+        notes.append(warning('Some atoms have occupancy below 1; occupancy is not applied.'))
     if renumbered:
         notes.append(
-            f'{renumbered} atoms have a residue number that is not a decimal integer; '
-            'their residues are numbered in order of appearance.'
+            info(
+                f'{renumbered} atoms have a residue number that is not a decimal integer; '
+                'their residues are numbered in order of appearance.'
+            )
         )
 
     lengths, triclinic = None, False
@@ -338,12 +375,12 @@ def read_pdb(
             triclinic = [float(cryst[i : i + 7]) for i in (33, 40, 47)] != [90.0, 90.0, 90.0]
         except ValueError:
             lengths, triclinic = None, False
-            notes.append('Cannot read the CRYST1 record; no box is stored.')
+            notes.append(info('Cannot read the CRYST1 record; no box is stored.'))
         else:
             if min(lengths) <= 1.0:  # many programs write a 1 Ang or zero placeholder
-                notes.append(f'The CRYST1 box {lengths} is a placeholder; it is not stored.')
+                notes.append(info(f'The CRYST1 box {lengths} is a placeholder; it is not stored.'))
                 lengths = None
-    box, wanted = _periodic(path, lengths, triclinic, unwrap, False, notes)
+    box, wanted = _periodic(path, lengths, triclinic, unwrap, False, notes, 'read_pdb')
 
     return _atoms(
         path,
@@ -413,8 +450,12 @@ def read_gro(path, *, residues=None, masses=None, elements=None, unwrap='auto') 
         found = sorted(set(resnames.tolist()))
         if len(found) > 1:
             notes.append(
-                f'Read {len(found)} residue names ({", ".join(found)}); pass residues= to '
-                'select the aggregate from its solvent.'
+                Diagnostic(
+                    f'Read {len(found)} residue names ({", ".join(found)}); pass residues= to '
+                    'select the aggregate from its solvent.',
+                    'warning',
+                    'read_gro',
+                )
             )
     else:
         kept = np.isin(resnames, residues)
@@ -423,7 +464,7 @@ def read_gro(path, *, residues=None, masses=None, elements=None, unwrap='auto') 
         resids, resnames, names, xyz = resids[kept], resnames[kept], names[kept], xyz[kept]
 
     lengths = box[:3] if min(box[:3]) > 1.0 else None  # GROMACS writes zeros for no box
-    box, wanted = _periodic(path, lengths, any(box[3:]), unwrap, True, notes)
+    box, wanted = _periodic(path, lengths, any(box[3:]), unwrap, True, notes, 'read_gro')
     return _atoms(
         path,
         sha,
@@ -474,7 +515,7 @@ def read_sld(path) -> Structure:
 
     notes = []
     if columns >= 7 and np.any(data[:, 4:7] != 0):
-        notes.append('Magnetic SLD columns are ignored.')
+        notes.append(Diagnostic('Magnetic SLD columns are ignored.', 'info', 'read_sld'))
     lattice = detect_lattice(xyz)
     if columns == 8:
         volume = data[:, 7]
@@ -487,17 +528,19 @@ def read_sld(path) -> Structure:
         )
     if np.any(volume <= 0):
         raise StructureError(f'{path}: every pixel volume must be positive.')
-    return Structure(
-        'pixels',
-        xyz,
-        data[:, 3],
-        volume,
-        lattice=lattice,
-        source=path,
-        source_sha256=sha,
-        format='sld',
-        reader_options={},
-        notes=tuple(notes),
+    return _reported(
+        Structure(
+            'pixels',
+            xyz,
+            data[:, 3],
+            volume,
+            lattice=lattice,
+            source=path,
+            source_sha256=sha,
+            format='sld',
+            reader_options={},
+            notes=tuple(notes),
+        )
     )
 
 
@@ -731,20 +774,23 @@ def read_vtk(path) -> Structure:
         kind = 'inverted' if volume[bad[0]] < 0 else 'degenerate'
         raise StructureError(f'{path}: cell {bad[0]} is {kind} (volume {volume[bad[0]]:.3g}).')
 
+    info, _ = _makers('read_vtk')
     notes = []
     if magnetic:
-        notes.append('Magnetic SLD fields are ignored.')
+        notes.append(info('Magnetic SLD fields are ignored.'))
     if where == 'POINT_DATA':
-        notes.append(f'SLD field {name!r} was averaged from points to cells.')
-    return Structure(
-        'cells',
-        centroid,
-        sld,
-        volume,
-        cell_diameter=diameter,
-        source=path,
-        source_sha256=sha,
-        format='vtk',
-        reader_options={},
-        notes=tuple(notes),
+        notes.append(info(f'SLD field {name!r} was averaged from points to cells.'))
+    return _reported(
+        Structure(
+            'cells',
+            centroid,
+            sld,
+            volume,
+            cell_diameter=diameter,
+            source=path,
+            source_sha256=sha,
+            format='vtk',
+            reader_options={},
+            notes=tuple(notes),
+        )
     )

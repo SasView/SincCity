@@ -8,35 +8,15 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
+import periodictable
 
+from ._base import Diagnostic, StructureError, residue_names
 from ._console import ANGSTROM, CUBIC_ANGSTROM, SLD_UNIT
-
-#: Partial specific volume of a typical protein, cm³/g.
-PROTEIN_SPECIFIC_VOLUME = 0.73
+from .elements import constants, sld_volume
+from .molecules import residue_runs
 
 #: Relative tolerance for positions on a lattice, as a fraction of the step.
 LATTICE_TOLERANCE = 1e-4
-
-
-class StructureError(ValueError):
-    """A structure file or array set cannot be used for a calculation."""
-
-
-def residue_names(names, option: str) -> list[str]:
-    """One residue name or an iterable of them, as a list.
-
-    Raises:
-        ValueError: If *names* is neither, naming the *option* it was given for.
-    """
-    if isinstance(names, str):
-        return [names]
-    try:
-        values = list(names)
-    except TypeError:
-        values = None
-    if values is None or not all(isinstance(name, str) for name in values):
-        raise ValueError(f'{option} must be residue names, got {names!r}.')
-    return [str(name) for name in values]
 
 
 def _owned(values: Any, dtype: Any = float) -> np.ndarray:
@@ -128,7 +108,9 @@ class Structure:
         source: Absolute path of the file, or ``'in-memory'``.
         source_sha256: Hash of the file as read.
         format: ``'pdb'``, ``'gro'``, ``'sld'``, ``'vtk'`` or ``'arrays'``.
-        notes: What the reader dropped, approximated or assumed.
+        notes: What the reader dropped, approximated or assumed, as
+            ``Diagnostic`` records; plain strings given here become records
+            of origin ``'given'``.
     """
 
     kind: str
@@ -176,7 +158,7 @@ class Structure:
         set_(self, 'xyz', _owned(xyz))
         set_(self, 'sld', _owned(sld))
         set_(self, 'volume', _owned(volume))
-        set_(self, 'notes', tuple(self.notes))
+        set_(self, 'notes', tuple(Diagnostic.of(note) for note in self.notes))
         has_resids, has_resnames, has_names = (
             getattr(self, name) is not None for name in ('resids', 'resnames', 'names')
         )
@@ -227,8 +209,6 @@ class Structure:
         This is how atoms read by another program come in without a file.
         Positions in Å.
         """
-        from .elements import sld_volume
-
         symbols = [str(symbol).capitalize() for symbol in symbols]
         sld, volume = sld_volume(symbols)
         sources = {} if resnames is None else dict.fromkeys(sorted(set(resnames)), 'given')
@@ -256,8 +236,6 @@ class Structure:
             StructureError: If the structure has no residue names, or a name is
                 not in it or has no hydrogens.
         """
-        from .elements import constants
-
         residues = residue_names(residues, 'residues')
         if self.resnames is None or self.symbols is None:
             raise StructureError('Only atoms with residue names can be deuterated.')
@@ -279,8 +257,6 @@ class Structure:
         ``'elements'`` in ``element_sources``. The copy keeps the source, but no
         reader made it, so its ``reader_options`` are None.
         """
-        from .elements import sld_volume
-
         if self.symbols is None:
             raise StructureError('Only atoms have elements.')
         symbols = np.array([str(symbol).capitalize() for symbol in symbols])
@@ -326,9 +302,7 @@ class Structure:
         """Atomic masses in g/mol (atoms only)."""
         if self.symbols is None:
             raise StructureError('Masses are only defined for atomic structures.')
-        from periodictable import elements
-
-        return np.array([elements.symbol(s).mass for s in self.symbols])
+        return np.array([periodictable.elements.symbol(s).mass for s in self.symbols])
 
     def radius_of_gyration(self, weights: str = 'sld', *, sld_solvent: float = 0.0) -> RgResult:
         """Radius of gyration, as a diagnostic that never raises.
@@ -379,8 +353,6 @@ class Structure:
         if self.cell_diameter is not None:
             info['max_cell_diameter'] = float(self.cell_diameter.max())
         if self.resids is not None:
-            from .molecules import residue_runs
-
             info['n_residues'] = int(residue_runs(self.resids, self.resnames)[0].size)
             info['residue_atoms'] = dict(sorted(Counter(self.resnames.tolist()).items()))
         if self.element_sources:
