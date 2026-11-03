@@ -33,7 +33,9 @@ PAIR_BLOCK_ELEMENTS = 50_000
 #: Pairs per block of the histogram pass: one matrix product of about this size.
 HISTOGRAM_BLOCK_PAIRS = 1_000_000
 
-#: Largest zero-padded grid the lattice path will allocate, in cells.
+#: Largest zero-padded grid the lattice path will allocate, in cells. A cell
+#: count, not a memory budget: at the cap the transforms, the lag key and the
+#: inverse-FFT temporaries peak near 400 MB (measured: 380 MiB for a 100³ grid).
 LATTICE_MAX_CELLS = 8_000_000
 
 

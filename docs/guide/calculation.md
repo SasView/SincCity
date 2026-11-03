@@ -85,6 +85,17 @@ reused.
 above about 10⁵ atoms. `calculate(progress=...)` can report progress or stop
 the pair passes of `'histogram'` and `'pairs'`.
 
+The amplitudes of `'average'` are taken about the centre of the bounding box,
+the origin SasView's `transform_center` uses, so the two agree. For a
+lopsided aggregate the centre of scattering length would be the more natural
+origin, and the result depends on the choice; the profile's note records the
+centre used, in Å.
+
+`'lattice'` zero-pads the grid to $2n - 1$ cells per axis and refuses grids
+above 8 million padded cells (`sinccity.debye.LATTICE_MAX_CELLS`); `'auto'`
+then falls back to `'histogram'`. The cap counts cells, not bytes: at the cap
+the transforms and their temporaries peak near 400 MB.
+
 ## Things to know
 
 !!! warning "PDB structures in a solvent are only qualitative"
@@ -104,5 +115,14 @@ the pair passes of `'histogram'` and `'pairs'`.
   dI and no dQ, with `qmin`, `qmax` and an empty `mask` set. A fit of it
   should state its weighting and resolution explicitly; pass
   `to_data1d(dI=...)` to attach uncertainties.
-- **Console output.** Progress lines go through the `sinccity` logger;
-  `sinccity.set_verbosity('quiet')` silences them.
+- **Notes.** What a reader dropped or assumed and what a calculation warns
+  about are `Diagnostic` records in `structure.notes` and `profile.notes`:
+  each is its text as a string, with a `severity` (`'warning'` or `'info'`)
+  and an `origin` (`'read_pdb'`, `'load'`, `'calculate'`, ...). Each is
+  reported once, where it is made: a reader's notes when the file is read,
+  not again when the structure is installed. Warnings are `UserWarning`s
+  pointing at your line; info notes are log lines. `profile.notes` holds the
+  structure's records followed by the calculation's.
+- **Console output.** Progress lines and info notes go through the `sinccity`
+  logger; `sinccity.set_verbosity('quiet')` silences them and
+  `set_verbosity('error')` the warnings too.

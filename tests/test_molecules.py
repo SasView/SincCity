@@ -1,5 +1,7 @@
 """Element data and guesses, the residue steps, and structures derived from others."""
 
+import os
+
 import numpy as np
 import pytest
 from support import C60, quiet_calculator
@@ -119,8 +121,8 @@ class TestDerivedStructures:
         with pytest.raises(StructureError, match='59 elements given for 60'):
             s.with_symbols(symbols[1:])
 
-        settings = quiet_calculator(fixed).get_settings()
-        assert settings['source'] == 'in-memory' and settings['derived_from'] == s.source
+        settings = quiet_calculator(fixed).get_settings(root=os.path.dirname(C60))
+        assert settings['source'] == 'in-memory' and settings['derived_from'] == 'c60.pdb'
         with pytest.raises(ValueError, match='set_structure'):
             GenericScatteringCalculator.from_settings(settings)
 

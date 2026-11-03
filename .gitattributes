@@ -1,0 +1,8 @@
+# Structure files are hashed: a settings record stores their SHA-256 and
+# from_settings warns when it differs. Check them out byte for byte, with no
+# line-ending conversion, so a record made on one platform replays cleanly
+# on another.
+*.pdb -text
+*.gro -text
+*.sld -text
+*.vtk -text

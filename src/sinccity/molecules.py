@@ -8,8 +8,8 @@ from collections.abc import Mapping, Sequence
 
 import numpy as np
 
+from ._base import StructureError
 from .elements import MASS_TABLE, element_from_mass, guess_stem
-from .model import StructureError
 
 
 def residue_runs(resids: np.ndarray, resnames: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

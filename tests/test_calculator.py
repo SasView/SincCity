@@ -1,9 +1,13 @@
 """The calculator: normalisation, warnings, state, output and plots."""
 
+import ast
 import copy
+import importlib.metadata
 import json
 import multiprocessing
+import os
 import pickle
+import shutil
 import subprocess
 import sys
 import warnings
@@ -14,8 +18,16 @@ import pytest
 from support import C60, gro_text, quiet_calculator, run_task, sphere_pixels
 
 import sinccity
+import sinccity._base
 import sinccity.calculator
-from sinccity import CalculationInterrupted, GenericScatteringCalculator, Structure, StructureError
+import sinccity.model
+from sinccity import (
+    CalculationInterrupted,
+    Diagnostic,
+    GenericScatteringCalculator,
+    Structure,
+    StructureError,
+)
 from sinccity.debye import debye_pairs
 from sinccity.elements import constants
 from sinccity.dispersion import gaussian_sizes
@@ -567,6 +579,40 @@ class TestCalculator:
         replay = GenericScatteringCalculator.from_settings(settings)
         assert replay.structure.n_points == 2
 
+    def test_settings_record_a_path_relative_to_a_given_root_and_replay_after_a_move(
+        self, tmp_path, monkeypatch
+    ):
+        project = tmp_path / 'project'
+        (project / 'data').mkdir(parents=True)
+        shutil.copy(C60, project / 'data' / 'c60.pdb')
+        monkeypatch.chdir(project)
+        calc = quiet_calculator('data/c60.pdb')
+        expected = calc.calculate().intensity
+        absolute = calc.get_settings()  # no root: the absolute path, whatever the working dir
+        assert same_file(absolute['source'], project / 'data' / 'c60.pdb')
+        settings = json.loads(json.dumps(calc.get_settings(root=project)))
+        assert settings['source'] == 'data/c60.pdb'
+        assert calc.get_settings(root=project / 'data')['source'] == 'c60.pdb'
+
+        monkeypatch.chdir(tmp_path)
+        moved = tmp_path / 'moved'
+        shutil.move(project, moved)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            replay = GenericScatteringCalculator.from_settings(settings, root=moved)
+        assert not any('has changed' in str(w.message) for w in caught)
+        assert np.allclose(replay.calculate().intensity, expected)
+
+        moved_absolute = dict(absolute, source=str(moved / 'data' / 'c60.pdb'))
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            for root in (None, tmp_path / 'elsewhere'):  # an absolute path ignores the root
+                replay = GenericScatteringCalculator.from_settings(moved_absolute, root=root)
+                assert replay.structure.n_points == 60
+
+    def test_version_comes_from_the_installed_distribution(self):
+        assert sinccity.__version__ == importlib.metadata.version('SincCity')
+
     def test_in_memory_settings_cannot_be_replayed(self):
         calc = quiet_calculator(sphere_pixels(radius=6.0))
         settings = calc.get_settings()
@@ -593,6 +639,110 @@ class TestCalculator:
         assert 'q grid' in capsys.readouterr().out
         with pytest.raises(ValueError, match='Unknown verbosity'):
             sinccity.set_verbosity('loud')
+
+
+# ============================================================================
+# Layering and diagnostics
+# ============================================================================
+
+
+def test_layering_has_no_lazy_imports_inside_the_package():
+    """``_base`` imports nothing of the package; ``model`` imports lazily only plotting."""
+    base = ast.parse(open(sinccity._base.__file__, encoding='utf-8').read())
+    assert not [n for n in ast.walk(base) if isinstance(n, ast.ImportFrom) and n.level > 0]
+    model = ast.parse(open(sinccity.model.__file__, encoding='utf-8').read())
+    nested = [
+        node.module
+        for function in ast.walk(model)
+        if isinstance(function, ast.FunctionDef)
+        for node in ast.walk(function)
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+    ]
+    assert nested == ['plotting']  # an optional dependency, imported when a plot is drawn
+
+
+def same_file(a, b):
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+THREE_RECORDS = (
+    'ATOM      1  C   ALA A   1       0.000   0.000   0.000  1.00  0.00           C\n'
+    'HETATM    2 FE   HEM A   2       2.000   0.000   0.000  1.00  0.00          FE\n'
+    'HETATM    3  O   HOH A   3       4.000   0.000   0.000  1.00  0.00           O\n'
+)
+
+
+class TestDiagnostics:
+    def test_a_diagnostic_is_its_text(self):
+        note = Diagnostic('Skipped 2 water atoms.', 'info', 'read_pdb')
+        assert note == 'Skipped 2 water atoms.' and 'water' in note and ' '.join([note]) == note
+        assert json.loads(json.dumps([note])) == [note.text] and type(note.text) is str
+        for clone in (pickle.loads(pickle.dumps(note)), copy.deepcopy(note)):
+            assert (clone, clone.severity, clone.origin) == (note, 'info', 'read_pdb')
+        with pytest.raises(AttributeError):
+            note.severity = 'warning'
+        with pytest.raises(ValueError, match='severity'):
+            Diagnostic('text', 'error')
+        given = Structure.from_arrays([[0.0, 0, 0]], [1e-6], [1.0])
+        given = Structure('pixels', given.xyz, given.sld, given.volume, notes=['by hand'])
+        assert given.notes[0].severity == 'warning' and given.notes[0].origin == 'given'
+
+    def test_reader_notes_are_records_reported_once_where_they_are_read(self, tmp_path, capsys):
+        path = tmp_path / 'three.pdb'
+        path.write_text(THREE_RECORDS)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            structure = sinccity.load(path)
+        assert [(n.severity, n.origin) for n in structure.notes] == [
+            ('warning', 'read_pdb'),  # HETATM skipped: pass include_hetatm=True
+            ('info', 'read_pdb'),  # water skipped, as documented
+        ]
+        assert [str(w.message) for w in caught] == [f'three.pdb: {structure.notes[0]}']
+        assert same_file(caught[0].filename, __file__)  # the user's line, not the package's
+        assert f'Note: three.pdb: {structure.notes[1]}' in capsys.readouterr().out
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            calc = GenericScatteringCalculator(structure)
+            calc.set_structure(structure)
+            profile = calc.calculate()
+        assert caught == []  # installing and calculating repeat nothing
+        assert all(a is b for a, b in zip(profile.notes, structure.notes))
+        assert profile.structure_summary['notes'] is structure.notes
+
+    def test_calculation_warnings_point_at_the_callers_line(self):
+        calc = quiet_calculator(C60)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            calc.set_params(sld_solvent=6.34e-6)
+            calc.calculate_series([{'params': {'sld_solvent': 6.34e-6}}])
+            calc.set_params(sld_solvent=6.34)
+            profile = calc.calculate()
+        messages = [str(w.message) for w in caught]
+        assert sum('Did you mean' in m for m in messages) == 2
+        assert sum('protein-like' in m for m in messages) == 2
+        assert all(same_file(w.filename, __file__) for w in caught)
+        volume = [n for n in profile.notes if n.origin == 'calculate']
+        assert len(volume) == 1 and volume[0].severity == 'warning'
+
+    def test_the_average_kernel_notes_its_centre(self):
+        calc = quiet_calculator(C60)
+        calc.set_params(kernel='average')
+        note = calc.calculate().notes[-1]
+        centre = ', '.join(f'{c:.4g}' for c in calc.structure.centre)
+        assert note.severity == 'info' and f'bounding-box centre ({centre}) Ang' in note
+
+    def test_verbosity_error_silences_warnings_but_keeps_the_notes(self):
+        calc = quiet_calculator(C60)
+        calc.set_params(sld_solvent=6.34)
+        sinccity.set_verbosity('error')
+        try:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always')
+                profile = calc.calculate()
+        finally:
+            sinccity.set_verbosity('info')
+        assert caught == [] and any('protein-like' in note for note in profile.notes)
 
 
 # ============================================================================

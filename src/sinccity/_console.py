@@ -1,4 +1,8 @@
-"""Console output: the package logger and encoding-safe glyphs.
+"""Console output: the package logger, diagnostics and encoding-safe glyphs.
+
+Diagnostics (``sinccity.Diagnostic``, the ``notes`` of structures and
+profiles) reach the console through ``emit`` alone: a ``'warning'`` as a
+``UserWarning`` at the caller's line, an ``'info'`` as a log line.
 
 Status messages that are a side effect of a call (structure loaded, q grid
 set, profile computed) go through ``logging.getLogger('sinccity')`` instead of
@@ -25,12 +29,19 @@ them there raises ``UnicodeEncodeError``.
 """
 
 import logging
+import os
 import sys
+import warnings
 from typing import Any
+
+from ._base import Diagnostic
 
 LOGGER_NAME = 'sinccity'
 
 logger = logging.getLogger(LOGGER_NAME)
+
+#: This package's directory, as frame file names spell it, ending in a separator.
+_PACKAGE_DIR = os.path.join(os.path.normcase(os.path.dirname(os.path.abspath(__file__))), '')
 
 
 class _StdoutHandler(logging.StreamHandler):
@@ -70,10 +81,11 @@ def set_verbosity(level: int | str = 'info') -> None:
     """Set how much the calculator reports about what it is doing.
 
     Args:
-        level: ``'quiet'`` to drop the progress messages and keep only
-            warnings, or any standard logging level as a name (``'info'``,
-            ``'debug'``, ``'warning'``, ``'error'``) or as an integer. Pass
-            ``logging.CRITICAL`` to suppress the warnings as well.
+        level: ``'quiet'`` to drop the progress messages and the ``'info'``
+            notes and keep only warnings, or any standard logging level as a
+            name (``'info'``, ``'debug'``, ``'warning'``, ``'error'``) or as an
+            integer. ``'error'`` or above suppresses the warnings as well;
+            the notes stay on the structure and the profile either way.
 
     Raises:
         ValueError: If *level* is not a recognized level name.
@@ -87,6 +99,36 @@ def set_verbosity(level: int | str = 'info') -> None:
             )
         level = resolved
     logger.setLevel(level)
+
+
+def _caller_level() -> int:
+    """The ``stacklevel`` of the first frame outside this package, seen from ``emit``.
+
+    Counting frames instead of fixing a number keeps a warning on the user's
+    line however many package frames lie between it and ``emit``.
+    """
+    frame, level = sys._getframe(1), 1  # level 1 is emit itself, as warnings.warn counts
+    while frame is not None and os.path.normcase(frame.f_code.co_filename).startswith(_PACKAGE_DIR):
+        frame, level = frame.f_back, level + 1
+    return level
+
+
+def emit(diagnostic: Diagnostic, context: str | None = None) -> None:
+    """Report *diagnostic* once, as its severity says.
+
+    The one place the package turns a diagnostic into output. A ``'warning'``
+    is a ``UserWarning`` attributed to the first frame outside the package; an
+    ``'info'`` is a log line. Both follow ``set_verbosity``.
+
+    Args:
+        diagnostic: The record.
+        context: Put before the text, such as the file a reader note is about.
+    """
+    text = f'{context}: {diagnostic.text}' if context else diagnostic.text
+    if diagnostic.severity == 'info':
+        logger.info(f'  Note: {text}')
+    elif logger.isEnabledFor(logging.WARNING):
+        warnings.warn(text, UserWarning, stacklevel=_caller_level())
 
 
 def _encodable(text: str) -> bool:

@@ -17,6 +17,13 @@ The readers follow SasView's with one deviation: the VTK cell geometry is
 recomputed, because SasView's volumes for hexahedra, wedges and pyramids are
 wrong. The GRO reader and the residue options come from coords2sans.
 
+Every policy that drops, approximates or assumes something adds a note to
+`structure.notes`, a `Diagnostic` with a `severity` and an `origin`. The
+reader reports each note once, as it reads the file: a `'warning'` (the
+result may not be what you meant, and an option changes it) as a
+`UserWarning`, an `'info'` (a documented policy, such as skipping waters) as
+a log line. Installing the structure in a calculator reports nothing again.
+
 ## Selecting residues
 
 `load_structure(path, residues=['CTA'])` reads only the atoms of these residue
