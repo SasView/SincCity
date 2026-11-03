@@ -62,6 +62,7 @@ def main() -> None:
     print(f'  source {settings["source"]!r}, sha256 {settings["source_sha256"][:12]}...')
     print(f'  reader options {settings["reader_options"]}')
     print(f'  versions {settings["versions"]}')
+    assert settings['source'] == 'micelle.gro', 'the path is recorded relative to the root'
 
     # Two workers, each with half the series; 'spawn' starts clean interpreters,
     # as on Windows and macOS. The root is where the data lives for the workers.
@@ -80,6 +81,8 @@ def main() -> None:
     for label, intensity in results.items():
         difference = np.max(np.abs(np.array(intensity) / expected[label] - 1))
         print(f'{label:<14} {intensity[0]:16.5g} {difference:36.1e}')
+        assert difference < 1e-12, f'{label}: the replayed curve differs from the in-process one'
+    assert results.keys() == expected.keys(), 'every entry of the series came back once'
 
 
 if __name__ == '__main__':  # required for 'spawn': workers import this file

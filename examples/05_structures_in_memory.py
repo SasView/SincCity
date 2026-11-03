@@ -46,10 +46,14 @@ for kernel in ('lattice', 'histogram', 'pairs', 'average'):
 # Differences on the scale of the curve, I(0) of the exact lattice kernel.
 reference = results['lattice'].intensity
 print(f'\n{"kernel":<10} {"time (s)":>9} {"largest difference from lattice, of I(0)":>42}')
+differences = {}
 for kernel, profile in results.items():
-    difference = np.max(np.abs(profile.intensity - reference)) / reference[0]
-    print(f'{kernel:<10} {profile.elapsed:9.3f} {difference:42.1e}')
+    differences[kernel] = np.max(np.abs(profile.intensity - reference)) / reference[0]
+    print(f'{kernel:<10} {profile.elapsed:9.3f} {differences[kernel]:42.1e}')
 print('the <A>^2 kernel is far off: a dumbbell is not spherically symmetric')
+assert differences['pairs'] < 1e-10, 'the pair sum and the lattice FFT are both exact'
+assert differences['histogram'] < 1e-4, 'the histogram kernel is exact to about 1e-4'
+assert differences['average'] > 1e-2, 'the <A>^2 kernel should miss a non-spherical shape'
 
 # ----------------------------------------------------------------------------
 # 2. Atoms: 27 benzene molecules, hydrogenated and deuterated
@@ -81,6 +85,8 @@ d = gsc.calculate(label='d-benzene')
 b = {element: constants(element)[0] * constants(element)[1] for element in ('C', 'H', 'D')}
 expected = ((b['C'] + b['H']) / (b['C'] + b['D'])) ** 2
 print(f'I(0) h / d: computed {h.intensity[0] / d.intensity[0]:.4f}, expected {expected:.4f}')
+# Not exact: q_min = 0.005 is not q = 0, but the cluster is small enough.
+assert np.isclose(h.intensity[0] / d.intensity[0], expected, rtol=1e-3), 'h / d off I(0) ratio'
 print(
     f'Rg by mass {cluster.radius_of_gyration("mass").value:.2f} Ang; by scattering length: '
     f'h {cluster.radius_of_gyration().value:.2f} Ang, '

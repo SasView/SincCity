@@ -38,6 +38,7 @@ gsc.set_params(kernel='pairs')
 exact = gsc.calculate()
 deviation = np.max(np.abs(profile.intensity - exact.intensity)) / exact.intensity[0]
 print(f'\nhistogram vs exact pair sum: largest difference {deviation:.1e} of I(0)')
+assert deviation < 1e-4, 'the histogram kernel is documented as exact to about 1e-4'
 
 # All 60 atoms sit on one sphere of radius R. A continuous shell of the same
 # total scattering length gives I(q) = I(0) sinc^2(q R); the discrete atoms
@@ -50,6 +51,10 @@ print(f'{"q (1/Ang)":>10} {"I(q) (1/cm)":>13} {"shell":>13} {"ratio":>7}')
 for i in range(0, exact.q.size, 8):
     q, value, model = exact.q[i], exact.intensity[i], shell[i]
     print(f'{q:10.3f} {value:13.5g} {model:13.5g} {value / model:7.3f}')
+# Up to the first zero the atoms are indistinguishable from the shell.
+inner = exact.q < np.pi / radius
+shell_error = np.max(np.abs(exact.intensity[inner] - shell[inner])) / exact.intensity[0]
+assert shell_error < 1e-3, f'C60 departs from a spherical shell by {shell_error:.1e} of I(0)'
 
 OUTPUT.mkdir(exist_ok=True)
 profile.save_csv(OUTPUT / 'c60.csv')  # two columns, the provenance in the header

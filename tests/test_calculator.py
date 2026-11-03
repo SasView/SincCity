@@ -579,15 +579,19 @@ class TestCalculator:
         replay = GenericScatteringCalculator.from_settings(settings)
         assert replay.structure.n_points == 2
 
-    def test_settings_record_a_relative_path_and_replay_after_a_move(self, tmp_path, monkeypatch):
+    def test_settings_record_a_path_relative_to_a_given_root_and_replay_after_a_move(
+        self, tmp_path, monkeypatch
+    ):
         project = tmp_path / 'project'
         (project / 'data').mkdir(parents=True)
         shutil.copy(C60, project / 'data' / 'c60.pdb')
         monkeypatch.chdir(project)
         calc = quiet_calculator('data/c60.pdb')
         expected = calc.calculate().intensity
-        settings = json.loads(json.dumps(calc.get_settings()))
-        assert settings['source'] == 'data/c60.pdb'  # the working directory is the root
+        absolute = calc.get_settings()  # no root: the absolute path, whatever the working dir
+        assert same_file(absolute['source'], project / 'data' / 'c60.pdb')
+        settings = json.loads(json.dumps(calc.get_settings(root=project)))
+        assert settings['source'] == 'data/c60.pdb'
         assert calc.get_settings(root=project / 'data')['source'] == 'c60.pdb'
 
         monkeypatch.chdir(tmp_path)
@@ -599,10 +603,12 @@ class TestCalculator:
         assert not any('has changed' in str(w.message) for w in caught)
         assert np.allclose(replay.calculate().intensity, expected)
 
-        legacy = dict(settings, source=str(moved / 'data' / 'c60.pdb'))  # 0.2 records: absolute
+        moved_absolute = dict(absolute, source=str(moved / 'data' / 'c60.pdb'))
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            assert GenericScatteringCalculator.from_settings(legacy).structure.n_points == 60
+            for root in (None, tmp_path / 'elsewhere'):  # an absolute path ignores the root
+                replay = GenericScatteringCalculator.from_settings(moved_absolute, root=root)
+                assert replay.structure.n_points == 60
 
     def test_version_comes_from_the_installed_distribution(self):
         assert sinccity.__version__ == importlib.metadata.version('SincCity')

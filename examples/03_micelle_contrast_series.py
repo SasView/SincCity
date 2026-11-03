@@ -40,6 +40,8 @@ with warnings.catch_warnings():
 print(f'{everything}: residues {sorted(set(everything.resnames.tolist()))}')
 for note in everything.notes:
     print(f'  [{note.severity:<7} {note.origin}] {note}')
+assert {note.origin for note in everything.notes} == {'read_gro'}
+assert any('pass residues=' in note and note.severity == 'warning' for note in everything.notes)
 
 # 2. The micelle only. The masses fix the elements (no guessing), and the
 #    molecules are made whole and joined across the box face.
@@ -52,6 +54,10 @@ print(
     f'Rg by mass {micelle.radius_of_gyration("mass").value:.2f} Ang, '
     f'by scattering length in vacuum {micelle.radius_of_gyration("sld").value:.2f} Ang'
 )
+assert micelle.element_sources == {'CTA': 'masses'}
+assert set(micelle.resnames.tolist()) == {'CTA'} and micelle.n_points == 24 * len(CTA_MASSES)
+# Folded into the box the micelle spans it; made whole it is about 50 Ang across.
+assert np.all(np.ptp(micelle.xyz, axis=0) < 0.8 * np.array(micelle.box)), 'not unwrapped'
 
 # 3. Four contrasts. Entries that share a deuteration share one pair pass.
 #    The atomic volumes come from bulk elemental densities, so in a solvent
@@ -81,9 +87,15 @@ for profile in profiles:
 # entry of each deuteration state reused the first one's spectrum, hence its
 # short time.
 print(f'\nkernel {profiles[0].method}, bin {profiles[0].histogram_bin:.2g} Ang')
+h_d2o, h_h2o, d_h2o, d_d2o = (profile.intensity[0] for profile in profiles)
+assert h_h2o < 0.05 * min(h_d2o, d_h2o, d_d2o), 'h-CTA in H2O should be nearly matched'
+assert d_h2o > 10 * h_h2o, 'deuteration should make the chains visible in H2O'
 
 # 4. The notes of one profile: the structure's records first (the same
 #    objects as micelle.notes), then those of the calculation.
 print('\nnotes of the first profile:')
 for note in profiles[0].notes:
     print(f'  [{note.severity:<7} {note.origin}] {note[:90]}{"..." if len(note) > 90 else ""}')
+first = profiles[0].notes
+assert first[: len(micelle.notes)] == micelle.notes, "the structure's records come first"
+assert any(note.origin == 'calculate' and 'protein-like' in note for note in first)

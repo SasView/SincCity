@@ -56,6 +56,8 @@ with warnings.catch_warnings(record=True) as caught:
     warnings.simplefilter('always')
     profile = gsc.calculate()
 print(f'\nwarned: {caught[0].message}' if caught else '\nno warning')
+assert any('cell size' in str(w.message) for w in caught), 'expected the cell-size warning'
+assert np.isclose(rod.total_volume, 20 * 20 * 80), 'cell volumes should sum to the rod'
 
 model = box_intensity(profile.q, 20.0, 20.0, 80.0, 3e-6)
 print(f'\n{"q (1/Ang)":>10} {"I(q) (1/cm)":>13} {"box":>13} {"ratio":>7}')
@@ -64,6 +66,9 @@ for i in range(0, profile.q.size, 3):
         f'{profile.q[i]:10.4f} {profile.intensity[i]:13.5g} {model[i]:13.5g} '
         f'{profile.intensity[i] / model[i]:7.3f}'
     )
+# Well below q = 1 / cell size the points follow the box to within 2 %.
+low = profile.q < 0.1
+assert np.all(np.abs(profile.intensity[low] / model[low] - 1) < 0.02), 'off the box form factor'
 
 # An SLD per point is averaged to each cell, and a magnetic vector field is
 # ignored; both are info notes on the structure.
@@ -73,3 +78,5 @@ with warnings.catch_warnings():
 print(f'\n{cube}: volumes {cube.volume.round(4).tolist()} Ang^3 (sum {cube.total_volume:g})')
 for note in cube.notes:
     print(f'  [{note.severity}] {note}')
+assert np.isclose(cube.total_volume, 8.0), 'the five tetrahedra should fill the cube [-1, 1]^3'
+assert [note.severity for note in cube.notes] == ['info', 'info']

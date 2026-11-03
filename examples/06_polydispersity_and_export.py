@@ -43,6 +43,9 @@ print(f'{"curve":<14} {"sizes":>6} {"I(q_min) / I(q_0)":>18} {"time (s)":>9}')
 for profile in profiles:
     depth = profile.intensity[first] / profile.intensity[0]
     print(f'{profile.label:<14} {profile.n_sizes:>6} {depth:18.3e} {profile.elapsed:9.3f}')
+depths = [profile.intensity[first] / profile.intensity[0] for profile in profiles]
+assert all(a < b for a, b in zip(depths, depths[1:])), 'a wider spread should fill the minimum more'
+assert profiles[0].n_sizes == 1 and all(profile.n_sizes > 1 for profile in profiles[1:])
 
 # CSV: q and I(q) with the provenance in an ASCII header.
 OUTPUT.mkdir(exist_ok=True)
@@ -51,6 +54,8 @@ for profile in profiles:
     profile.save_csv(path)
 print(f'\nsaved {len(profiles)} CSV files in {OUTPUT}; header of the last one:')
 print(path.read_text().splitlines()[0][:160] + ' ...')
+saved = np.loadtxt(path, delimiter=',')  # the header lines are comments
+assert np.allclose(saved, np.column_stack([profiles[-1].q, profiles[-1].intensity])), 'CSV'
 
 # A sasdata Data1D, for IQuana.set_data or any sasmodels fit. The curve is
 # theory, so uncertainties are given explicitly, here 2 %.

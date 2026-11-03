@@ -237,10 +237,10 @@ coords2sans.
   SHA-256, the reader options, the q grid, every parameter and the package
   versions. `GenericScatteringCalculator.from_settings(settings)` rebuilds
   the calculator and warns if the file or the periodictable version changed.
-  The path is recorded relative to the working directory, or to
-  `get_settings(root=...)`, with `/` separators, and resolved against
-  `from_settings(settings, root=...)`, so a record survives a move of the
-  project; the hash shows whether the file is the same. Records
+  The path is recorded as an absolute path, or, with
+  `get_settings(root=...)`, relative to that root with `/` separators and
+  resolved against `from_settings(settings, root=...)`, so a record survives
+  a move of the project; the hash shows whether the file is the same. Records
   of version 0.1 replay with the new parameters at their defaults,
   except the kernel: `'auto'` for pixels on a lattice and otherwise
   `'pairs'`, the pair sum 0.1 used, so a record gives the curve it was

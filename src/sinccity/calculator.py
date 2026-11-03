@@ -155,11 +155,13 @@ def _note(notes: list[Diagnostic], text: str, severity: str = 'warning') -> None
 
 
 def _settings_path(path: str, root) -> str:
-    """*path* relative to *root* (the working directory when None), with ``/`` separators.
+    """*path* relative to *root*, with ``/`` separators; *path* itself when *root* is None.
 
     A path with no relative form (another drive on Windows) stays absolute.
     """
-    root = os.path.abspath(os.getcwd() if root is None else os.fspath(root))
+    if root is None:
+        return path
+    root = os.path.abspath(os.fspath(root))
     try:
         return pathlib.Path(os.path.relpath(path, root)).as_posix()
     except ValueError:
@@ -909,19 +911,20 @@ class GenericScatteringCalculator:
     def get_settings(self, *, root: str | os.PathLike | None = None) -> dict[str, Any]:
         """A JSON-serialisable record of the source, grid, parameters and versions.
 
-        The file is recorded by its path relative to *root*, with ``/``
-        separators, so the record still replays after the project moves or on
-        another machine; the SHA-256 shows whether it is the same file. Replay
-        with the same root: ``from_settings(settings, root=...)``.
+        The file is recorded by its absolute path. With *root*, it is recorded
+        relative to *root* instead, with ``/`` separators, so the record still
+        replays after the project moves or on another machine; replay it with
+        ``from_settings(settings, root=...)``. Either way the SHA-256 shows
+        whether it is the same file.
 
         A structure no reader made (``from_arrays``, or a copy derived from a
         file) is recorded as ``'in-memory'``, which ``from_settings`` refuses;
         a derived copy also records ``derived_from``, for information only.
 
         Args:
-            root: The directory the path is relative to; the working directory
-                when None. A file on another drive is recorded by its absolute
-                path.
+            root: The directory to record the path relative to; None records
+                the absolute path. A file on another drive than *root* is
+                recorded by its absolute path.
         """
         structure = self._require_structure()
         replayable = structure.reader_options is not None
@@ -951,14 +954,15 @@ class GenericScatteringCalculator:
 
         Args:
             settings: The record.
-            root: The directory a relative source path is relative to; the
-                working directory when None. An absolute path, as records
-                before 0.3 hold, is used as it is.
+            root: The directory a relative source path is relative to, as
+                given to ``get_settings(root=...)``; the working directory when
+                None. An absolute path is used as it is.
         """
         if settings['source'] == 'in-memory':
             raise ValueError('These settings describe an in-memory structure; use set_structure().')
-        base = os.getcwd() if root is None else os.fspath(root)
-        path = os.path.join(os.path.abspath(base), settings['source'])
+        path = settings['source']
+        if root is not None:
+            path = os.path.join(os.path.abspath(os.fspath(root)), path)
         calculator = cls()
         structure = calculator.load_structure(path, **(settings.get('reader_options') or {}))
         if structure.source_sha256 != settings['source_sha256']:

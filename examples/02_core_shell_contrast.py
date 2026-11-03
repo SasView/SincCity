@@ -67,6 +67,8 @@ for profile, (name, sld) in zip(profiles, solvents.items()):
         f'{name:<14} {profile.method:<8} {profile.intensity[0]:16.4g} '
         f'{"ratio " + f"{ratio.min():.3f} to {ratio.max():.3f}":>31}'
     )
+    assert profile.method == 'lattice', f'{name}: pixels on a lattice should use the FFT kernel'
+    assert np.all(np.abs(ratio - 1) < 0.01), f'{name}: off the core-shell model by over 1 %'
 
 # With the shell matched only the core scatters: a sphere of contrast -3e-6.
 matched = profiles[2]
@@ -80,3 +82,6 @@ for i in range(0, matched.q.size, 6):
         f'{matched.intensity[i] / sphere[i]:7.3f}'
     )
 print(f'\n{matched.n_zero_contrast} of {structure.n_points} pixels have zero contrast')
+low = matched.q < 0.25  # below the first zero of the core sphere
+assert np.all(np.abs(matched.intensity[low] / sphere[low] - 1) < 0.01), 'core alone: not a sphere'
+assert matched.n_zero_contrast == np.count_nonzero(~core), 'every shell pixel should be matched'
