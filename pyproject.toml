@@ -19,8 +19,9 @@ dependencies = [
 ]
 
 [project.urls]
-Documentation = "https://easyscience.github.io/SincCity/"
-Source = "https://github.com/easyscience/SincCity"
+Documentation = "https://sasview.github.io/SincCity/"
+Source = "https://github.com/SasView/SincCity"
+Issues = "https://github.com/SasView/SincCity/issues"
 
 [project.optional-dependencies]
 plot = [

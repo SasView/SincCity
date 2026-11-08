@@ -67,7 +67,7 @@ profiles = gsc.calculate_series([
   records and worker processes.
 - [Coming from coords2sans](guide/coords2sans.md): the names that changed.
 - [API reference](api/calculator.md): every public class and function.
-- [Examples](https://github.com/easyscience/SincCity/tree/master/examples):
+- [Examples](https://github.com/SasView/SincCity/tree/master/examples):
   seven runnable scripts, from a PDB file in vacuum to contrast series run in
   worker processes, with the structure files they read.
 

@@ -1,5 +1,5 @@
 # Build the documentation on every push; a tag v<version> also deploys it to
-# GitHub Pages (https://easyscience.github.io/SincCity/).
+# GitHub Pages (https://sasview.github.io/SincCity/).
 
 name: Docs
 

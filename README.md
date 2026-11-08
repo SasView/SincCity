@@ -1,7 +1,7 @@
 # SincCity: Generic Scattering Calculator
 
-[![CI](https://github.com/easyscience/SincCity/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/easyscience/SincCity/actions/workflows/ci.yml)
-[![Docs](https://github.com/easyscience/SincCity/actions/workflows/docs.yml/badge.svg?branch=master)](https://easyscience.github.io/SincCity/)
+[![CI](https://github.com/SasView/SincCity/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/SasView/SincCity/actions/workflows/ci.yml)
+[![Docs](https://github.com/SasView/SincCity/actions/workflows/docs.yml/badge.svg?branch=master)](https://sasview.github.io/SincCity/)
 [![PyPI](https://img.shields.io/pypi/v/sinccity.svg)](https://pypi.org/project/sinccity/)
 
 The orientationally averaged I(q) of a real-space structure, by the Debye

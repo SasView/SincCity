@@ -1,8 +1,8 @@
 site_name: SincCity
 site_description: 'Generic Scattering Calculator: I(q) of a real-space structure (PDB, GRO, SLD or VTK)'
-site_url: https://easyscience.github.io/SincCity/
-repo_url: https://github.com/easyscience/SincCity
-repo_name: easyscience/SincCity
+site_url: https://sasview.github.io/SincCity/
+repo_url: https://github.com/SasView/SincCity
+repo_name: SasView/SincCity
 edit_uri: edit/master/docs/
 copyright: BSD 3-Clause, SincCity contributors
 
