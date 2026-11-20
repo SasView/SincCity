@@ -19,7 +19,8 @@ v·v kept apart, so another solvent costs only the sinc sums:
   for any point set (coords2sans's pass).
 - ``spectrum_radial``: each point's distance from a centre, the squared
   orientation-averaged amplitude ⟨A⟩², exact only for spherically symmetric
-  structures (SasView's ``is_avg``).
+  structures (SasView's ``is_avg``). Its ``amplitude`` is the ⟨F(q)⟩ that
+  β(q) = ⟨F⟩² / D(q) needs, exact for any structure.
 """
 
 from collections.abc import Callable
@@ -87,12 +88,21 @@ class DistanceSpectrum:
 
     def debye(self, q, rho: float) -> np.ndarray:
         """D(q) at a solvent SLD *rho* in Å⁻²."""
-        q = np.asarray(q, dtype=float)
         if self.squared:
-            b, v = self.components
-            return _sinc_sum(q, self.r, b - rho * v) ** 2
+            return self.amplitude(q, rho) ** 2
         bb, bv, vv = self.components
-        return _sinc_sum(q, self.r, bb - 2 * rho * bv + rho**2 * vv)
+        return _sinc_sum(np.asarray(q, dtype=float), self.r, bb - 2 * rho * bv + rho**2 * vv)
+
+    def amplitude(self, q, rho: float) -> np.ndarray:
+        r"""The orientation-averaged amplitude $\sum_r (b - \rho v) \operatorname{sinc}(q r)$, Å.
+
+        Raises:
+            ValueError: For a pair spectrum, which holds no amplitude.
+        """
+        if not self.squared:
+            raise ValueError('Only a squared (radial) spectrum has an amplitude.')
+        b, v = self.components
+        return _sinc_sum(np.asarray(q, dtype=float), self.r, b - rho * v)
 
 
 def _occupied(r: np.ndarray, components: np.ndarray, keep=None) -> DistanceSpectrum:

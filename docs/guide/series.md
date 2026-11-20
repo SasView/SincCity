@@ -22,7 +22,8 @@ profiles = gsc.calculate_series([
 ```
 
 - All entries are checked before anything runs; a bad entry is a
-  `ValueError` that names it.
+  `ValueError` that names it. That includes a `beta_centre='contrast'` that
+  cannot be found at the entry's solvent.
 - Entries that share a deuteration state and kernel share one pair pass.
 - The profiles come back in the order given, each with its `label`.
 - The parameters are left as they were, and `gsc.profile` is that of the last
@@ -54,6 +55,11 @@ path. An absolute path replays as it is, with or without a root.
 Records of version 0.1 replay with the new parameters at their defaults,
 except the kernel: `'auto'` for pixels on a lattice and otherwise `'pairs'`,
 the pair sum 0.1 used, so a record gives the curve it was made with.
+
+With `beta` off a record leaves out `beta` and `beta_centre`, so it is the
+same as before they existed and replays on versions without them. A record
+with `beta` on holds both; a version without them refuses it with "Unknown
+parameter 'beta'", since it cannot make that profile.
 
 A structure no file and options can rebuild (`from_arrays`, `from_atoms`, or
 a `deuterated` / `with_symbols` copy) is recorded as `'in-memory'`, which

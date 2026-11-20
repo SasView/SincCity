@@ -187,19 +187,30 @@ def plot_points(
 
 
 def plot_profile(
-    profile, *, data=None, log_scale: bool = True, show: bool | None = None
+    profile,
+    *,
+    data=None,
+    log_scale: bool = True,
+    show: bool | None = None,
+    quantity: str = 'intensity',
 ) -> go.Figure:
-    """Plot a computed I(q), optionally over measured data.
+    """Plot a computed I(q), optionally over measured data, or its β(q).
 
     On log axes, non-positive intensities cannot be drawn: they are left out
     and counted in an annotation; the profile itself is not changed. A
     measured overlay is usually resolution-smeared while the profile is not.
+    ``quantity='beta'`` draws β(q) without its nan points, on a linear y axis
+    (*log_scale* then sets the q axis only); measured data cannot go over it.
     """
-    q, intensity = profile.q, profile.intensity
-    name = f'GSC {profile.label}'
-    if log_scale and not np.any(intensity > 0):
+    beta = quantity == 'beta'
+    if beta and data is not None:
+        raise ValueError('Measured data is I(q); it cannot be drawn over beta(q).')
+    q, values, _ = profile._curve(quantity)
+    name = f'GSC {profile.label}' + (' beta' if beta else '')
+    if log_scale and not beta and not np.any(values > 0):
         log_scale = False  # nothing to draw on log axes, e.g. a zero background
-    drawn = intensity > 0 if log_scale else np.ones(q.size, dtype=bool)
+    y_log = log_scale and not beta
+    drawn = values > 0 if y_log else np.ones(q.size, dtype=bool)
 
     fig = go.Figure()
     if data is not None:
@@ -213,7 +224,7 @@ def plot_profile(
                 marker={'size': 5},
             )
         )
-    fig.add_trace(go.Scatter(x=q[drawn], y=intensity[drawn], mode='lines', name=name))
+    fig.add_trace(go.Scatter(x=q[drawn], y=values[drawn], mode='lines', name=name))
     skipped = int(np.sum(~drawn))
     if skipped:
         fig.add_annotation(
@@ -224,11 +235,13 @@ def plot_profile(
             y=0.98,
             showarrow=False,
         )
-    axis_type = 'log' if log_scale else 'linear'
     fig.update_layout(
         title=name,
-        xaxis={'title': 'q (Å⁻¹)', 'type': axis_type},
-        yaxis={'title': 'I(q) (cm⁻¹)', 'type': axis_type},
+        xaxis={'title': 'q (Å⁻¹)', 'type': 'log' if log_scale else 'linear'},
+        yaxis={
+            'title': 'β(q)' if beta else 'I(q) (cm⁻¹)',
+            'type': 'log' if y_log else 'linear',
+        },
     )
     if resolve_show(show):
         fig.show()

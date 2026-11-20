@@ -15,7 +15,7 @@ from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 import pytest
-from support import C60, gro_text, quiet_calculator, run_task, sphere_pixels
+from support import C60, brute, gro_text, quiet_calculator, run_task, sphere_pixels
 
 import sinccity
 import sinccity._base
@@ -28,6 +28,7 @@ from sinccity import (
     Structure,
     StructureError,
 )
+from sinccity.calculator import BETA_PARAMS, DEFAULT_PARAMS
 from sinccity.debye import debye_pairs
 from sinccity.elements import constants
 from sinccity.dispersion import gaussian_sizes
@@ -409,6 +410,328 @@ class TestSeries:
         replay = GenericScatteringCalculator.from_settings(settings)
         # atoms: the pair sum of 0.1.0, so the record gives the curve it was made with
         assert replay.get_params()['kernel'] == 'pairs' and replay.structure.n_points == 33
+
+
+# ============================================================================
+# beta(q) and structure factors
+# ============================================================================
+
+
+def sinc(x):
+    return np.sinc(x / np.pi)
+
+
+def beta_calculator(structure, q=None, **params):
+    """A quiet calculator with ``beta`` on, on the q values given."""
+    calc = quiet_calculator(structure)
+    if q is not None:
+        calc.set_q(q)
+    calc.set_params(beta=True, **params)
+    return calc
+
+
+def ellipsoid(a=10.0, c=22.0, step=2.0):
+    """Pixels of an ellipsoid of revolution, semi-axes a, a, c (Ang); the half z > 0 is denser."""
+    n = int(c // step) + 1
+    axis = np.arange(-n, n + 1) * step
+    xyz = np.stack(np.meshgrid(axis, axis, axis, indexing='ij'), -1).reshape(-1, 3)
+    xyz = xyz[(xyz[:, 0] ** 2 + xyz[:, 1] ** 2) / a**2 + xyz[:, 2] ** 2 / c**2 <= 1]
+    sld = np.where(xyz[:, 2] > 0, 2e-6, 1e-6)
+    return Structure.from_arrays(xyz, sld, np.full(len(xyz), step**3))
+
+
+def orientation_average(q, xyz, w, centre, n=48):
+    """<F> and <|F|^2> of F = sum w exp(i q.(x - c)): Gauss-Legendre in cos theta, uniform in phi."""
+    mu, weight_mu = np.polynomial.legendre.leggauss(n)
+    phi = np.arange(2 * n) * np.pi / n
+    sin_theta = np.sqrt(1 - mu**2)
+    directions = np.stack(
+        [
+            np.outer(sin_theta, np.cos(phi)),
+            np.outer(sin_theta, np.sin(phi)),
+            np.outer(mu, np.ones(phi.size)),
+        ],
+        -1,
+    ).reshape(-1, 3)
+    weights = np.repeat(weight_mu, phi.size) / (2 * phi.size)  # they add up to 1
+    phase = (xyz - centre) @ directions.T
+    amplitudes = np.array([w @ np.exp(1j * qi * phase) for qi in q])
+    return (amplitudes @ weights).real, np.abs(amplitudes) ** 2 @ weights
+
+
+# Three points whose weights add up to exactly zero, and to 1e-9 with the last one changed
+NET_ZERO = np.array([[0.0, 0, 0], [6, 0, 0], [0, 5, 0]])
+
+
+def net_zero(third=-1e-6):
+    return Structure.from_arrays(NET_ZERO, np.array([2e-6, -1e-6, third]), np.ones(3))
+
+
+class TestBeta:
+    def test_two_equal_points_against_the_closed_form(self):
+        d, w = 7.3, 1e-6
+        calc = beta_calculator(
+            Structure.from_arrays(TestSizes.xyz, [w, w], [1.0, 1.0]), kernel='pairs', scale=0.2
+        )
+        profile = calc.calculate()
+        q = calc.q
+        assert np.allclose(profile.beta_centre_xyz, [0, 0, d / 2])
+        assert np.allclose(profile.amplitude, 2 * w * sinc(q * d / 2), rtol=1e-12)
+        assert np.allclose(profile.beta, 2 * sinc(q * d / 2) ** 2 / (1 + sinc(q * d)), rtol=1e-12)
+        s = 1 - 0.3 * np.exp(-q * 10)
+        expected = profile.intensity + 0.2 * 1e8 * (2 * w * sinc(q * d / 2)) ** 2 / 2.0 * (s - 1)
+        assert np.allclose(profile.with_structure_factor(s), expected, rtol=1e-12)
+
+    def test_a_pixel_sphere_has_beta_one_below_its_first_minimum(self):
+        calc = beta_calculator(sphere_pixels(), np.geomspace(1e-3, 0.3, 40), sld_solvent=6.34)
+        profile = calc.calculate()
+        assert profile.method == 'lattice'
+        below = calc.q * 30 <= 3
+        assert np.all(np.abs(profile.beta[below] - 1) < 1e-3)
+
+    def test_an_ellipsoid_against_the_orientation_average_of_its_points(self):
+        structure = ellipsoid(a=6.0, c=12.0)
+        calc = beta_calculator(structure, np.geomspace(1e-3, 0.3, 10))
+        profile = calc.calculate()
+        assert profile.method == 'lattice'
+        w = structure.sld * structure.volume
+        mean, square = orientation_average(calc.q, structure.xyz, w, profile.beta_centre_xyz)
+        assert np.allclose(profile.amplitude, mean, rtol=0, atol=1e-10 * w.sum())
+        assert np.allclose(profile.beta, mean**2 / square, rtol=0, atol=1e-9)
+        assert profile.beta[-1] < 0.9  # far from a sphere
+
+    def test_the_kernels_agree_and_beta_stays_below_one(self):
+        betas = {}
+        for kernel in ('lattice', 'histogram', 'pairs'):
+            calc = beta_calculator(ellipsoid(), np.geomspace(1e-3, 0.4, 30), kernel=kernel)
+            betas[kernel] = calc.calculate().beta
+        kept = np.all([np.isfinite(b) for b in betas.values()], axis=0)
+        assert kept.sum() > 25
+        for kernel in ('histogram', 'pairs'):
+            assert np.allclose(betas[kernel][kept], betas['lattice'][kept], rtol=0, atol=1e-4)
+        assert all(np.max(b[kept]) <= 1 + 1e-3 for b in betas.values())
+
+    def test_at_zero_net_contrast_beta_falls_as_q_squared(self):
+        q = np.geomspace(1e-3, 3e-3, 5)
+        profile = beta_calculator(net_zero(), q, kernel='pairs').calculate()
+        w, centre = np.array([2e-6, -1e-6, -1e-6]), profile.beta_centre_xyz
+        dipole = np.linalg.norm(w @ NET_ZERO) ** 2
+        coefficient = (w @ ((NET_ZERO - centre) ** 2).sum(1)) ** 2 / (12 * dipole)
+        assert np.allclose(profile.beta, coefficient * q**2, rtol=1e-3)
+
+    def test_near_the_match_point_the_histogram_blanks_low_q_and_pairs_does_not(self):
+        q = np.geomspace(1e-3, 0.3, 12)
+        with pytest.warns(UserWarning, match=r'4 of 12 values, at q from 0.001 to .* are nan'):
+            histogram = beta_calculator(net_zero(-0.999e-6), q, kernel='histogram').calculate()
+        assert np.all(np.isnan(histogram.beta[:4])) and np.all(np.isfinite(histogram.beta[4:]))
+        assert np.all(np.isfinite(histogram.with_structure_factor(np.full(12, 0.5))))
+        pairs = beta_calculator(net_zero(-0.999e-6), q, kernel='pairs').calculate()
+        w = np.array([2e-6, -1e-6, -0.999e-6])
+        r = np.linalg.norm(NET_ZERO - pairs.beta_centre_xyz, axis=1)
+        amplitude = np.array([w @ sinc(qi * r) for qi in q])
+        assert np.allclose(pairs.beta, amplitude**2 / brute(q, NET_ZERO, w), rtol=1e-9)
+
+    def test_sizes_square_the_mean_amplitude(self):
+        rng = np.random.default_rng(11)
+        xyz = rng.normal(size=(30, 3)) * [6, 3, 2] + [4, 0, 0]
+        sld, volume = rng.random(30) * 1e-6 + 1e-6, rng.random(30) + 0.5
+        structure = Structure.from_arrays(xyz, sld, volume)
+        q = np.r_[1e-6, np.geomspace(1e-2, 0.5, 8)]
+        params = {'kernel': 'pairs', 'size_pd': 0.2, 'size_pd_n': 5}
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')  # pairs over sizes warns
+            profile = beta_calculator(structure, q, **params).calculate()
+        factors, shares = gaussian_sizes(0.2, 5, 3.0)
+        assert profile.beta[0] == pytest.approx(
+            np.sum(shares * factors**3) ** 2 / np.sum(shares * factors**6), rel=1e-9
+        )
+        centre, amplitude, debye = profile.beta_centre_xyz, 0, 0
+        for f, s in zip(factors, shares):  # a copy blown up about the centre
+            copy = Structure.from_arrays(centre + f * (xyz - centre), sld, f**3 * volume)
+            one = beta_calculator(copy, q, kernel='pairs').calculate()
+            amplitude = amplitude + s * one.amplitude
+            debye = debye + s * one.intensity * one.normalisation_volume / 1e8
+        assert np.allclose(profile.amplitude, amplitude, rtol=1e-10)
+        assert np.allclose(profile.beta, amplitude**2 / debye, rtol=1e-10)
+        assert np.all(profile.beta <= 1)
+
+    def test_the_box_centre_gives_the_average_kernel(self):
+        profile = beta_calculator(C60, beta_centre='box').calculate()
+        average = quiet_calculator(C60)
+        average.set_params(kernel='average')
+        expected = average.calculate().intensity
+        assert np.allclose(1e8 * profile.amplitude**2 / profile.normalisation_volume, expected)
+
+    def test_named_centres_follow_the_structure_and_given_ones_do_not(self):
+        rng = np.random.default_rng(12)
+        xyz = rng.normal(size=(40, 3)) * [8, 3, 2]
+        sld = rng.choice([1e-6, 2e-6, 4e-6], size=40)  # the first population matches
+        shift = np.array([10.0, -3.0, 4.0])
+        for centre in ('volume', 'active', 'contrast', 'box'):
+            profiles = [
+                beta_calculator(
+                    Structure.from_arrays(points, sld, np.ones(40)),
+                    kernel='pairs',
+                    sld_solvent=1.0,
+                    beta_centre=centre,
+                ).calculate()
+                for points in (xyz, xyz + shift)
+            ]
+            assert np.allclose(profiles[1].beta_centre_xyz, profiles[0].beta_centre_xyz + shift)
+            assert np.allclose(profiles[1].beta, profiles[0].beta, rtol=1e-9)
+        given = [
+            beta_calculator(
+                Structure.from_arrays(points, sld, np.ones(40)),
+                kernel='pairs',
+                beta_centre=(0, 0, 0),
+            ).calculate()
+            for points in (xyz, xyz + shift)
+        ]
+        assert not np.allclose(given[1].beta, given[0].beta, rtol=1e-3)
+
+    def test_the_default_centre_stays_put_when_a_component_is_matched(self):
+        rng = np.random.default_rng(13)
+        xyz = np.vstack([rng.normal(size=(30, 3)) * 3, rng.normal(size=(20, 3)) * 2 + [12, 0, 0]])
+        sld = np.r_[np.full(30, 1e-6), np.full(20, 4e-6)]
+        calc = beta_calculator(Structure.from_arrays(xyz, sld, np.ones(50)), kernel='pairs')
+        series = [
+            {'params': {'sld_solvent': 0.0, 'beta_centre': centre}}
+            for centre in ('volume', 'active')
+        ] + [
+            {'params': {'sld_solvent': 4.0, 'beta_centre': centre}}  # the offset part matched
+            for centre in ('volume', 'active')
+        ]
+        volume, active, volume_matched, active_matched = calc.calculate_series(series)
+        assert np.allclose(volume.beta_centre_xyz, volume_matched.beta_centre_xyz)
+        assert np.allclose(volume.beta_centre_xyz, active.beta_centre_xyz)
+        assert np.allclose(active_matched.beta_centre_xyz, xyz[:30].mean(0))
+        assert any("normalisation_volume is 'auto'" in note for note in volume_matched.notes)
+
+    def test_an_undefined_contrast_centre_fails_before_any_pair_pass(self, passes):
+        cases = {'net 0 Ang': [1e-6, -1e-6], 'lies outside': [1e-6, -0.99e-6]}
+        for message, sld in cases.items():
+            structure = Structure.from_arrays([[0.0, 0, 0], [0, 0, 5]], sld, [1.0, 1.0])
+            calc = beta_calculator(structure, kernel='histogram', beta_centre='contrast')
+            with pytest.raises(ValueError, match=f"{message}.*use beta_centre='volume'"):
+                calc.calculate()
+            calc.set_params(beta_centre='volume')
+            with pytest.raises(ValueError, match=r"Series entry 1 \(None\): .*'contrast'"):
+                calc.calculate_series([{'params': {}}, {'params': {'beta_centre': 'contrast'}}])
+        assert passes == []
+
+    @pytest.mark.parametrize(
+        'centre, finite', [('volume', True), ('active', False), ('contrast', False),
+                           ('box', True), ((1, 2, 3), True)]
+    )  # fmt: skip
+    def test_nothing_scatters(self, centre, finite, capsys):
+        structure = Structure.from_arrays([[0.0, 0, 0], [0, 0, 5]], [2e-6, 2e-6], [1.0, 1.0])
+        calc = beta_calculator(structure, sld_solvent=2.0, background=0.1, beta_centre=centre)
+        with pytest.warns(UserWarning, match='Every point matches'):
+            profile = calc.calculate()
+        assert np.all(profile.amplitude == 0) and np.all(np.isnan(profile.beta))
+        assert np.all(np.isfinite(profile.beta_centre_xyz)) == finite
+        assert np.array_equal(profile.with_structure_factor(np.full(30, 0.5)), profile.intensity)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')  # no numpy all-nan warning
+            profile.describe()
+        assert 'n/a' in capsys.readouterr().out
+
+    def test_parameter_checks(self):
+        calc = quiet_calculator(C60)
+        for bad in ({'beta': 1}, {'beta_centre': 'middle'}, {'beta_centre': (1, 2)}):
+            with pytest.raises(ValueError, match='beta'):
+                calc.set_params(**bad)
+        calc.set_params(beta_centre=[1, 2, 3])
+        assert calc.get_params()['beta_centre'] == (1.0, 2.0, 3.0)
+        with pytest.raises(ValueError, match=r"beta=True .* kernel='average'"):
+            calc.set_params(beta=True, kernel='average')
+        calc.set_params(kernel='average')
+        with pytest.raises(ValueError, match=r"beta=True .* kernel='average'"):
+            calc.set_params(beta=True)
+        assert calc.get_params()['beta'] is False
+        calc.set_params(kernel='auto', beta=True)
+        with pytest.raises(ValueError, match=r"Series entry 0 .*kernel='average'"):
+            calc.calculate_series([{'params': {'kernel': 'average'}}])
+        calc.calculate_series([{'params': {'kernel': 'average', 'beta': False}}])
+
+    @pytest.mark.filterwarnings('ignore:Atomic volumes')
+    def test_the_intensity_is_unchanged_and_the_pair_pass_shared(self, micelle, passes):
+        micelle.set_params(beta=True)
+        profiles = micelle.calculate_series(SERIES)
+        assert len(passes) == 2 and all(p.beta is not None for p in profiles)  # one per state
+        micelle.set_params(beta=False)
+        plain = micelle.calculate_series(SERIES)
+        assert all(np.array_equal(a.intensity, b.intensity) for a, b in zip(profiles, plain))
+
+    def test_the_beta_pass_can_be_stopped(self):
+        calc = quiet_calculator(C60)
+        calc.calculate()  # the spectrum is cached: only the beta pass reports progress
+        calc.set_params(beta=True)
+        with pytest.raises(CalculationInterrupted, match='Beta pass'):
+            calc.calculate(progress=lambda fraction: True)
+        assert calc.profile is None
+
+    @pytest.mark.filterwarnings('ignore:.*guessed from atom names')
+    def test_settings_leave_beta_out_until_it_is_set(self):
+        calc = quiet_calculator(C60)
+        off = json.loads(json.dumps(calc.get_settings()))
+        assert set(off['params']) == set(DEFAULT_PARAMS) - set(BETA_PARAMS)
+        assert GenericScatteringCalculator.from_settings(off).get_params()['beta'] is False
+        calc.set_params(beta=True, beta_centre=(1.0, 2.0, 3.0))
+        on = json.loads(json.dumps(calc.get_settings()))
+        assert on['params']['beta'] is True and on['params']['beta_centre'] == [1.0, 2.0, 3.0]
+        replay = GenericScatteringCalculator.from_settings(on)
+        assert replay.get_params()['beta_centre'] == (1.0, 2.0, 3.0)
+        assert np.array_equal(replay.calculate().beta, calc.calculate().beta)
+
+    def test_with_structure_factor_takes_arrays_and_callables(self):
+        profile = beta_calculator(C60).calculate()
+        assert np.array_equal(profile.with_structure_factor(np.ones(30)), profile.intensity)
+        s = 1 - 0.5 * np.exp(-profile.q * 20)
+        assert np.array_equal(
+            profile.with_structure_factor(s),
+            profile.with_structure_factor(lambda q: 1 - 0.5 * np.exp(-q * 20)),
+        )
+        with pytest.raises(ValueError, match='one value per q'):
+            profile.with_structure_factor(np.ones(3))
+        with pytest.raises(ValueError, match='beta=True'):
+            quiet_calculator(C60).calculate().with_structure_factor(np.ones(30))
+
+    def test_beta_exports_leave_out_the_nan_points(self, tmp_path):
+        q = np.geomspace(1e-3, 0.3, 12)
+        with pytest.warns(UserWarning, match='are nan'):
+            profile = beta_calculator(net_zero(-0.999e-6), q, kernel='histogram').calculate()
+        data = profile.to_data1d(quantity='beta', dI=np.full(12, 0.01))
+        assert np.array_equal(data.x, q[4:]) and np.array_equal(data.y, profile.beta[4:])
+        assert data.dy.size == 8 and data.title.endswith(' beta')
+        assert '4 nan beta points left out' in data.process[-1].description
+        profile.save_csv(tmp_path / 'beta.csv', quantity='beta')
+        text = (tmp_path / 'beta.csv').read_text()
+        assert '4 nan beta points left out' in text and '# q (1/Ang), beta' in text
+        saved = np.loadtxt(tmp_path / 'beta.csv', delimiter=',')
+        assert np.allclose(saved, np.column_stack([data.x, data.y]))
+        with pytest.raises(ValueError, match='quantity'):
+            profile.save_csv(tmp_path / 'x.csv', quantity='amplitude')
+        with pytest.raises(ValueError, match='no beta'):
+            quiet_calculator(C60).calculate().to_data1d(quantity='beta')
+
+    def test_beta_plot(self):
+        calc = beta_calculator(C60)
+        calc.calculate()
+        fig = calc.plot_profile(quantity='beta', show=False)
+        assert fig.layout.yaxis.type == 'linear' and fig.layout.xaxis.type == 'log'
+        assert fig.layout.yaxis.title.text == 'β(q)'
+        with pytest.raises(ValueError, match='cannot be drawn over beta'):
+            calc.plot_profile(quantity='beta', data=calc.profile.to_data1d(), show=False)
+
+    def test_describe_and_provenance_give_the_centre(self, capsys):
+        profile = beta_calculator(C60, beta_centre='box').calculate()
+        centre = ', '.join(f'{c:.4g}' for c in profile.beta_centre_xyz)
+        assert f'beta about ({centre}) Ang (box)' in profile._process_text()
+        profile.describe()
+        assert 'Beta' in capsys.readouterr().out
+        note = next(n for n in profile.notes if n.startswith('beta: amplitudes about'))
+        assert note.severity == 'info' and "('box')" in note
 
 
 # ============================================================================

@@ -111,14 +111,34 @@ residue names (PDB, GRO or `Structure.from_atoms` with `resnames=`); a name
 that is not in the structure, or whose atoms include no hydrogen, is an error.
 `structure.deuterated(['CTA'])` returns the same change as a new structure.
 
+**β(q) and structure factors.** `set_params(beta=True)` also computes the
+orientation-averaged amplitude about a centre and β(q) = ⟨F⟩² / ⟨F²⟩, in time
+linear in the points; `I(q)` is unchanged. A structure factor is then applied
+in the decoupling approximation:
+
+```python
+gsc.set_params(beta=True, scale=0.2, normalisation_volume=particle_volume)
+profile = gsc.calculate()
+profile.beta                                # β(q); nan where D(q) is too small to divide by
+intensity = profile.with_structure_factor(s)   # P(q) [1 + β(q) (S(q) - 1)], 1/cm
+```
+
+`beta_centre` sets the point S(q) is about: `'volume'` (the default, the
+volume centroid of all points), `'active'`, `'contrast'`, `'box'` or
+`(x, y, z)` in Å. S(q) belongs to the number density `scale / V_norm`, so set
+`normalisation_volume` to the particle volume. The structure must be one whole
+particle. See [Calculation](https://sasview.github.io/SincCity/guide/calculation/)
+for the assumptions and the rules for nan points.
+
 ## Examples
 
-[`examples/`](examples/) holds seven runnable scripts, each checked against
+[`examples/`](examples/) holds eight runnable scripts, each checked against
 an analytic result where one exists: C60 from a PDB file, contrast matching
 of a core-shell particle of SLD pixels, a CTA micelle from a GROMACS frame in
 four contrasts, a hexahedral VTK mesh, structures built from arrays, size
-polydispersity with CSV and `Data1D` output, and settings records replayed in
-worker processes. See [`examples/README.md`](examples/README.md).
+polydispersity with CSV and `Data1D` output, settings records replayed in
+worker processes, and β(q) with a hard-sphere structure factor for an
+ellipsoid. See [`examples/README.md`](examples/README.md).
 
 ```bash
 python examples/02_core_shell_contrast.py
@@ -248,6 +268,8 @@ coords2sans.
   A structure no file and options can rebuild (`from_arrays`, `from_atoms`,
   or a `deuterated` / `with_symbols` copy) is recorded as `'in-memory'`, which
   `from_settings` refuses; a derived copy also records `derived_from`.
+  With `beta` off a record leaves out `beta` and `beta_centre`, so it still
+  replays on versions without them.
 - **Series and worker processes.** `gsc.calculate_series(series)` computes
   one profile per entry, each a `label` and `set_params` keys that apply to
   that entry only. All entries are checked before anything runs, entries

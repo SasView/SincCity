@@ -20,6 +20,7 @@ ignores.
 | [`05_structures_in_memory.py`](05_structures_in_memory.py) | Structures without a file | none | `Structure.from_arrays` (a Janus dumbbell) and the four kernels compared, `Structure.from_atoms` (a benzene cluster) with H and D |
 | [`06_polydispersity_and_export.py`](06_polydispersity_and_export.py) | A size distribution, and output | `core_shell_sphere.sld` | `size_pd` filling in the form-factor minimum, CSV, a sasdata `Data1D` with uncertainties; `--plot` overlays the curves |
 | [`07_settings_and_workers.py`](07_settings_and_workers.py) | Reproducible tasks in other processes | `micelle.gro` | `get_settings(root=)` saved as JSON, `from_settings(root=)` in two `spawn` worker processes that split a series |
+| [`08_beta_structure_factor.py`](08_beta_structure_factor.py) | A structure factor for a particle that is not a sphere | none | `set_params(beta=True)` on a pixel ellipsoid, β against the continuum ellipsoid, a Percus–Yevick hard-sphere S(q) through `with_structure_factor`, `normalisation_volume` for the number density, β about two centres; `--plot` draws the curves and β |
 
 The three synthetic files (`core_shell_sphere.sld`, `micelle.gro`,
 `rod_hexahedra.vtk`) are written by
