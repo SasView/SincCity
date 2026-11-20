@@ -62,14 +62,16 @@ profiles = gsc.calculate_series([
 - [Structures](guide/structures.md): the file formats, residue selection,
   elements and periodic boxes.
 - [Calculation](guide/calculation.md): the formula, units, normalisation,
-  size polydispersity, deuteration and the kernels.
+  size polydispersity, deuteration, the kernels, and β(q) for structure
+  factors.
 - [Series and reproducibility](guide/series.md): contrast series, settings
   records and worker processes.
 - [Coming from coords2sans](guide/coords2sans.md): the names that changed.
 - [API reference](api/calculator.md): every public class and function.
 - [Examples](https://github.com/SasView/SincCity/tree/master/examples):
-  seven runnable scripts, from a PDB file in vacuum to contrast series run in
-  worker processes, with the structure files they read.
+  eight runnable scripts, from a PDB file in vacuum to contrast series run in
+  worker processes and a structure factor for an ellipsoid, with the
+  structure files they read.
 
 ## Licence
 

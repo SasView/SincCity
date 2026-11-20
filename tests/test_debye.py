@@ -115,8 +115,18 @@ class TestSpectra:
         spectrum = spectrum_radial(xyz, b, v, centre)
         r = np.linalg.norm(xyz - centre, axis=1)
         amplitude = np.array([((b - 0.2 * v) * np.sinc(qi * r / np.pi)).sum() for qi in Q])
+        assert np.allclose(spectrum.amplitude(Q, 0.2), amplitude, rtol=1e-12)
         assert np.allclose(spectrum.debye(Q, 0.2), amplitude**2)
+        assert spectrum.amplitude([0.0], 0.2)[0] == pytest.approx((b - 0.2 * v).sum())
         assert spectrum.debye([0.0], 0.2)[0] == pytest.approx((b - 0.2 * v).sum() ** 2)
+
+    def test_a_pair_spectrum_has_no_amplitude_and_is_the_squared_sum_at_q_zero(self):
+        rng = np.random.default_rng(9)
+        xyz, b, v = rng.normal(size=(30, 3)) * 5, rng.normal(size=30), rng.random(30)
+        spectrum = spectrum_histogram(xyz, b, v, 0.01)
+        assert spectrum.debye([0.0], 0.2)[0] == pytest.approx((b - 0.2 * v).sum() ** 2)
+        with pytest.raises(ValueError, match='radial'):
+            spectrum.amplitude(Q, 0.2)
 
 
 class TestPhysics:

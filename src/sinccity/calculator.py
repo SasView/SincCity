@@ -60,6 +60,18 @@ NEAR_MATCH = 1e-6
 #: The point-per-cell approximation is flagged above q * cell size = 1.
 CELL_SIZE_LIMIT = 1.0
 
+#: The named ``beta_centre`` choices; three coordinates in Å are the other kind.
+BETA_CENTRES = ('volume', 'active', 'contrast', 'box')
+
+#: β is nan where D(q) is below this many times its estimated error.
+BETA_NOISE_FACTOR = 10.0
+
+#: The round-off allowance of the exact kernels, relative to (Σ|w|)².
+BETA_ROUNDOFF = 1e-10
+
+#: β above 1 by more than this is flagged: more than the kernels' error allows.
+BETA_EXCESS = 1e-3
+
 #: The parameters ``set_params`` takes, and their defaults.
 DEFAULT_PARAMS: dict[str, Any] = {
     'scale': 1.0,
@@ -72,7 +84,13 @@ DEFAULT_PARAMS: dict[str, Any] = {
     'size_pd': 0.0,
     'size_pd_n': 35,
     'size_pd_nsigma': 3.0,
+    'beta': False,
+    'beta_centre': 'volume',
 }
+
+#: Parameters a settings record leaves out when ``beta`` is off, so that it
+#: replays on versions without them.
+BETA_PARAMS = ('beta', 'beta_centre')
 
 _UNSET = object()
 
@@ -91,6 +109,12 @@ def _check_param(name: str, value: Any) -> Any:
         if value not in KERNELS:
             raise ValueError(f'kernel must be one of {", ".join(KERNELS)}, got {value!r}.')
         return value
+    if name == 'beta':
+        if not isinstance(value, (bool, np.bool_)):
+            raise ValueError(f'beta must be True or False, got {value!r}.')
+        return bool(value)
+    if name == 'beta_centre':
+        return _check_centre(value)
     if name == 'size_pd_n':
         if int(value) != value or value < 1:
             raise ValueError(f'size_pd_n must be an integer of at least 1, got {value!r}.')
@@ -119,6 +143,23 @@ def _check_param(name: str, value: Any) -> Any:
     return value
 
 
+def _check_centre(value: Any) -> str | tuple[float, float, float]:
+    """A ``beta_centre``: one of ``BETA_CENTRES``, or three finite coordinates as a tuple."""
+    if isinstance(value, str):
+        if value not in BETA_CENTRES:
+            raise ValueError(
+                f'beta_centre must be one of {", ".join(BETA_CENTRES)} or (x, y, z), got {value!r}.'
+            )
+        return value
+    try:
+        centre = np.asarray(value, dtype=float)
+    except (TypeError, ValueError):
+        centre = None
+    if centre is None or centre.shape != (3,) or not np.all(np.isfinite(centre)):
+        raise ValueError(f'beta_centre must be a name or three finite coordinates, got {value!r}.')
+    return tuple(float(c) for c in centre)
+
+
 def _checked_params(params: dict[str, Any], changes: dict[str, Any]) -> dict[str, Any]:
     """A copy of *params* with *changes* checked and applied."""
     new = dict(params)
@@ -126,7 +167,29 @@ def _checked_params(params: dict[str, Any], changes: dict[str, Any]) -> dict[str
         if name not in DEFAULT_PARAMS:
             raise ValueError(f'Unknown parameter {name!r}; use {", ".join(DEFAULT_PARAMS)}.')
         new[name] = _check_param(name, value)
+    if new['beta'] and new['kernel'] == 'average':
+        raise ValueError(
+            "beta=True needs the Debye sum for P(q), and kernel='average' gives <A>^2 instead; "
+            'use another kernel, or beta=False.'
+        )
     return new
+
+
+def _xyz_text(xyz) -> str:
+    """Coordinates as ``x, y, z`` to four digits, for notes and descriptions."""
+    return ', '.join(f'{c:.4g}' for c in xyz)
+
+
+def _centre_name(choice) -> str:
+    """How a ``beta_centre`` was chosen: its name, or ``'given'`` for coordinates."""
+    return choice if isinstance(choice, str) else 'given'
+
+
+def _outside(centre: np.ndarray, points: np.ndarray) -> bool:
+    """Whether *centre* lies outside the bounding box of *points*, beyond round-off."""
+    slack = 1e-9 * (1 + np.abs(points).max())
+    low, high = points.min(axis=0) - slack, points.max(axis=0) + slack
+    return bool(np.any(centre < low) or np.any(centre > high))
 
 
 def validate_q_grid(q: Any) -> np.ndarray:
@@ -201,6 +264,13 @@ class ScatteringProfile:
             as ``structure.notes``), then those of the calculation (origin
             ``'calculate'``).
         elapsed: Calculation time, s.
+        amplitude: The orientation-averaged amplitude ⟨F(q)⟩ about
+            ``beta_centre_xyz``, summed over the sizes, signed, Å (contrast ×
+            volume); None unless ``beta`` was set.
+        beta: β(q) = ⟨F⟩² / ⟨F²⟩, nan where D(q) is too small against its
+            estimated error to divide by; None unless ``beta`` was set.
+        beta_centre_xyz: The centre the amplitude is taken about, Å; None
+            unless ``beta`` was set. ``params['beta_centre']`` is how it was chosen.
     """
 
     q: np.ndarray
@@ -215,11 +285,16 @@ class ScatteringProfile:
     deuterated: tuple[str, ...]
     notes: tuple[str, ...]
     elapsed: float
+    amplitude: np.ndarray | None
+    beta: np.ndarray | None
+    beta_centre_xyz: np.ndarray | None
     _params: dict = field(repr=False)
     _structure_summary: dict = field(repr=False)
 
     def __post_init__(self) -> None:
-        for name in ('q', 'intensity'):
+        for name in ('q', 'intensity', 'amplitude', 'beta', 'beta_centre_xyz'):
+            if getattr(self, name) is None:
+                continue
             array = np.array(getattr(self, name), dtype=float, copy=True)
             array.setflags(write=False)
             object.__setattr__(self, name, array)
@@ -257,11 +332,36 @@ class ScatteringProfile:
                 f', size_pd={p["size_pd"]:g} over {self.n_sizes} sizes '
                 f'(nsigma {p["size_pd_nsigma"]:g})'
             )
+        if self.beta_centre_xyz is not None:
+            text += (
+                f', beta about ({_xyz_text(self.beta_centre_xyz)}) Ang '
+                f'({_centre_name(p["beta_centre"])})'
+            )
         if self.notes:
             text += '; notes: ' + ' | '.join(self.notes)
         return text.encode('ascii', 'replace').decode('ascii')
 
-    def to_data1d(self, *, dI=None):
+    def _curve(self, quantity: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """q, the values of *quantity* and the mask of the q values kept: β leaves out its nans.
+
+        Raises:
+            ValueError: For an unknown quantity, or ``'beta'`` without β.
+        """
+        if quantity == 'intensity':
+            return self.q, self.intensity, np.ones(self.q.size, dtype=bool)
+        if quantity != 'beta':
+            raise ValueError(f"quantity must be 'intensity' or 'beta', got {quantity!r}.")
+        if self.beta is None:
+            raise ValueError('This profile has no beta: calculate it with set_params(beta=True).')
+        kept = np.isfinite(self.beta)
+        return self.q[kept], self.beta[kept], kept
+
+    def _export_text(self, kept: np.ndarray) -> str:
+        """The provenance, plus the β points left out, for file content."""
+        dropped = int(np.sum(~kept))
+        return self._process_text() + (f'; {dropped} nan beta points left out' if dropped else '')
+
+    def to_data1d(self, *, quantity: str = 'intensity', dI=None):
         """Return the curve as a fit-ready sasdata ``Data1D``.
 
         The curve is theory, so it carries no dQ and, unless *dI* is given, no
@@ -272,35 +372,82 @@ class ScatteringProfile:
         sasdata is an optional dependency (``pip install "sinccity[sasdata]"``).
 
         Args:
-            dI: Optional uncertainties: finite, non-negative, one per q.
+            quantity: ``'intensity'`` for I(q), or ``'beta'`` for β(q) without
+                its nan points; the process description counts them.
+            dI: Optional uncertainties: finite, non-negative, one per q of the
+                profile.
         """
         try:
             from sasdata.dataloader.data_info import Data1D, Process
         except ImportError as exc:
             raise ImportError('to_data1d needs sasdata: pip install "sinccity[sasdata]"') from exc
+        q, y, kept = self._curve(quantity)
         dy = None
         if dI is not None:
             dy = np.array(dI, dtype=float, copy=True)
             if dy.shape != self.q.shape or not np.all(np.isfinite(dy)) or np.any(dy < 0):
                 raise ValueError('dI must be finite, non-negative, and have one value per q.')
-        data = Data1D(x=self.q.copy(), y=self.intensity.copy(), dy=dy)
-        data.title = f'GSC {self.label}'
+            dy = dy[kept]
+        data = Data1D(x=q.copy(), y=y.copy(), dy=dy)
+        data.title = f'GSC {self.label}' + (' beta' if quantity == 'beta' else '')
         process = Process()
         process.name = 'sinccity'
-        process.description = self._process_text()
+        process.description = self._export_text(kept)
         data.process.append(process)
-        data.qmin, data.qmax = float(self.q[0]), float(self.q[-1])
-        data.mask = np.zeros(self.q.size, dtype=bool)
+        data.qmin, data.qmax = float(q[0]), float(q[-1])
+        data.mask = np.zeros(q.size, dtype=bool)
         return data
 
-    def save_csv(self, path) -> None:
-        """Write q and I(q) as CSV, with the settings in an ASCII header."""
+    def save_csv(self, path, *, quantity: str = 'intensity') -> None:
+        """Write q and I(q), or q and β(q) without its nan points, as CSV.
+
+        The settings are in an ASCII header, which counts the β points left out.
+        """
+        q, y, kept = self._curve(quantity)
+        column = 'I (1/cm)' if quantity == 'intensity' else 'beta'
         header = (
-            f'{self._process_text()}\n'
+            f'{self._export_text(kept)}\n'
             f'source: {self._structure_summary["source"]}\n'
-            'q (1/Ang), I (1/cm)'
+            f'q (1/Ang), {column}'
         )
-        np.savetxt(path, np.column_stack([self.q, self.intensity]), delimiter=',', header=header)
+        np.savetxt(path, np.column_stack([q, y]), delimiter=',', header=header)
+
+    def with_structure_factor(self, s) -> np.ndarray:
+        r"""I(q) with a structure factor S(q), in the decoupling approximation, 1/cm.
+
+        $I_S = I + \mathrm{scale} \cdot 10^8 \, A^2 (S - 1) / V_\mathrm{norm}$, with
+        A the ``amplitude``. It never divides by D(q), so it is finite where
+        ``beta`` is nan. When nothing scatters it is ``intensity``.
+
+        It assumes, and cannot check:
+
+        1. The structure is one whole particle.
+        2. Orientations are independent of positions.
+        3. Sizes are independent of positions. With ``size_pd > 0`` one S(q)
+           serves every size, so for excluded-volume interactions *s* must be
+           an effective structure factor and the result is an approximation.
+        4. S(q) belongs to the number density n = scale / V_norm: its volume
+           fraction is n times the volume the particles exclude. ``scale`` is
+           that volume fraction only when V_norm is that volume; with a matched
+           component or with atoms it is not, so set ``normalisation_volume``.
+
+        Args:
+            s: S(q), one value per q, or a callable that takes q in 1/Å.
+
+        Raises:
+            ValueError: Without ``beta``, or when *s* has the wrong shape.
+        """
+        if self.amplitude is None:
+            raise ValueError(
+                'with_structure_factor needs the amplitude: calculate with set_params(beta=True).'
+            )
+        s = np.asarray(s(self.q) if callable(s) else s, dtype=float)
+        if s.shape != self.q.shape:
+            raise ValueError(f'S(q) needs one value per q ({self.q.size}), got shape {s.shape}.')
+        if self.method == 'none':
+            return self.intensity.copy()
+        factor = self._params['scale'] * 1e8 / self.normalisation_volume
+        return self.intensity + factor * self.amplitude**2 * (s - 1)
 
     def _lines(self) -> list[tuple[str, str]]:
         s, p = self._structure_summary, self._params
@@ -326,6 +473,16 @@ class ScatteringProfile:
                     f'size_pd {p["size_pd"]:g}, {self.n_sizes} sizes, nsigma {p["size_pd_nsigma"]:g}',
                 )
             )
+        if self.beta is not None:
+            finite = self.beta[np.isfinite(self.beta)]
+            span = f'{finite.min():.4g} to {finite.max():.4g}' if finite.size else 'n/a'
+            rows.append(
+                (
+                    'Beta',
+                    f'{span}, about ({_xyz_text(self.beta_centre_xyz)}) {ANGSTROM} '
+                    f'({_centre_name(p["beta_centre"])})',
+                )
+            )
         rows.extend(('Note', note) for note in self.notes)
         return rows
 
@@ -341,11 +498,18 @@ class ScatteringProfile:
         )
         return f'<table>{cells}</table>'
 
-    def plot(self, *, data=None, log_scale: bool = True, show: bool | None = None):
-        """Plot I(q); see ``sinccity.plotting.plot_profile``."""
+    def plot(
+        self,
+        *,
+        data=None,
+        log_scale: bool = True,
+        show: bool | None = None,
+        quantity: str = 'intensity',
+    ):
+        """Plot I(q), or β(q) with ``quantity='beta'``; see ``sinccity.plotting.plot_profile``."""
         from .plotting import plot_profile
 
-        return plot_profile(self, data=data, log_scale=log_scale, show=show)
+        return plot_profile(self, data=data, log_scale=log_scale, show=show, quantity=quantity)
 
 
 class GenericScatteringCalculator:
@@ -366,6 +530,10 @@ class GenericScatteringCalculator:
     that does not depend on the solvent; the last one is kept, so a change of
     ``sld_solvent``, ``scale``, ``background`` or ``normalisation_volume``
     costs only the sums over q.
+
+    With ``beta=True`` the profile also holds the orientation-averaged
+    amplitude ⟨F(q)⟩ and β(q) = ⟨F⟩² / ⟨F²⟩, so that a structure factor can
+    be applied with ``profile.with_structure_factor``.
 
     Example:
         >>> gsc = GenericScatteringCalculator('particle.sld')
@@ -477,6 +645,8 @@ class GenericScatteringCalculator:
         size_pd=_UNSET,
         size_pd_n=_UNSET,
         size_pd_nsigma=_UNSET,
+        beta=_UNSET,
+        beta_centre=_UNSET,
     ) -> None:
         """Set any of the calculation parameters; the others are kept.
 
@@ -506,6 +676,15 @@ class GenericScatteringCalculator:
                 structure (a Gaussian, as sasmodels' ``radius_pd``); 0 is one size.
             size_pd_n: Number of sizes, >= 1.
             size_pd_nsigma: Half-range of the sizes in standard deviations, > 0.
+            beta: Also compute the amplitude ⟨F(q)⟩ and β(q) (``profile.beta``),
+                in time linear in the points. Not with ``kernel='average'``.
+            beta_centre: The point the amplitude is taken about, the one a
+                structure factor describes: ``'volume'`` (the default), the
+                volume centroid of all points; ``'active'``, of the points that
+                scatter; ``'contrast'``, the centroid of contrast × volume, an
+                error near zero net contrast; ``'box'``, the bounding-box centre
+                as ``kernel='average'`` uses; or (x, y, z) in Å, in the
+                coordinates of ``structure.xyz``.
         """
         changes = {k: v for k, v in locals().items() if k != 'self' and v is not _UNSET}
         self._params = _checked_params(self._params, changes)
@@ -533,6 +712,10 @@ class GenericScatteringCalculator:
                 f', size_pd {p["size_pd"]:g} ({p["size_pd_n"]} sizes, '
                 f'nsigma {p["size_pd_nsigma"]:g})'
             )
+        if p['beta']:
+            centre = p['beta_centre']
+            centre = centre if isinstance(centre, str) else f'({_xyz_text(centre)}) {ANGSTROM}'
+            text += f', beta about {centre}'
         return text
 
     # ------------------------------------------------------------ calculation
@@ -611,8 +794,11 @@ class GenericScatteringCalculator:
                 if not isinstance(changes, dict):
                     raise ValueError('params is a dict of set_params keys.')
                 params = _checked_params(self._params, changes)
-                if params['deuterated']:
-                    structure.deuterated(params['deuterated'])  # names not in the structure
+                scattering = structure
+                if params['deuterated']:  # names not in the structure
+                    scattering = structure.deuterated(params['deuterated'])
+                if params['beta']:  # a centre that cannot be resolved
+                    self._beta_centre(structure, scattering.sld, params)
             except (ValueError, TypeError) as exc:
                 raise ValueError(f'Series entry {number} ({label!r}): {exc}') from exc
             entries.append((label, params))
@@ -658,6 +844,9 @@ class GenericScatteringCalculator:
         start = time.perf_counter()
         bin_width = None
         factors, shares = self._sizes(p)
+        # resolved before the pair pass, so that a centre that cannot be found costs nothing
+        centre = self._beta_centre(structure, sld, p) if p['beta'] else None
+        amplitude = beta = None
 
         if not active.any():
             _note(
@@ -667,6 +856,8 @@ class GenericScatteringCalculator:
             intensity = np.full(q.size, p['background'])
             v_norm = p['normalisation_volume'] if explicit else float('nan')
             method = 'none'
+            if centre is not None:
+                amplitude, beta = np.zeros(q.size), np.full(q.size, np.nan)
         else:
             # the shares' mean volume, as sasmodels normalises a size distribution
             mean_volume = float(np.sum(shares * factors**3) * structure.volume[active].sum())
@@ -675,6 +866,10 @@ class GenericScatteringCalculator:
             self._check(structure, contrast, active, factors.max(), notes)
             debye, bin_width = self._debye(method, structure, sld, active, progress, notes)
             intensity = p['scale'] * 1e8 * debye / v_norm + p['background']
+            if centre is not None:
+                amplitude, beta = self._beta(
+                    structure, sld, active, centre, debye, bin_width, progress, notes
+                )
 
         summary = {
             'source': structure.source,
@@ -700,6 +895,9 @@ class GenericScatteringCalculator:
             deuterated=p['deuterated'],
             notes=tuple(notes),
             elapsed=time.perf_counter() - start,
+            amplitude=amplitude,
+            beta=beta,
+            beta_centre_xyz=centre,
             _params=dict(p),
             _structure_summary=summary,
         )
@@ -830,12 +1028,11 @@ class GenericScatteringCalculator:
                 )
             ), None
         if kernel == 'average':
-            centre = ', '.join(f'{c:.4g}' for c in structure.centre)
             _note(
                 notes,
                 '<A>^2 kernel: exact only for spherically symmetric structures; amplitudes are '
-                f'taken about the bounding-box centre ({centre}) Ang, as SasView does, and the '
-                'result depends on that choice.',
+                f'taken about the bounding-box centre ({_xyz_text(structure.centre)}) Ang, as '
+                'SasView does, and the result depends on that choice.',
                 'info',
             )
         spectrum, bin_width = self._spectrum(kernel, structure, sld, active, report, notes)
@@ -879,6 +1076,113 @@ class GenericScatteringCalculator:
         self._cache = (structure, deuterated, kernel, active, bin_width, spectrum)
         return spectrum, bin_width
 
+    @staticmethod
+    def _beta_centre(structure: Structure, sld, p: dict[str, Any]) -> np.ndarray:
+        """The centre the amplitude is taken about, Å, as ``p['beta_centre']`` chooses it.
+
+        ``'active'`` and ``'contrast'`` give nan coordinates when nothing scatters.
+
+        Raises:
+            ValueError: For ``'contrast'`` near zero net contrast: the centroid is
+                undefined, or lies outside the bounding box of the points that scatter.
+        """
+        choice, xyz, volume = p['beta_centre'], structure.xyz, structure.volume
+        if not isinstance(choice, str):
+            return np.array(choice)
+        if choice == 'box':
+            return structure.centre
+        if choice == 'volume':
+            return volume @ xyz / volume.sum()
+        w = (sld - p['sld_solvent'] * 1e-6) * volume
+        active = w != 0
+        if not active.any():
+            return np.full(3, np.nan)
+        if choice == 'active':
+            return volume[active] @ xyz[active] / volume[active].sum()
+        net = w.sum()
+        advice = "beta_centre='contrast' is undefined this close to zero net contrast"
+        if abs(net) <= NEAR_MATCH * np.abs(w).sum():
+            raise ValueError(f"{advice} (net {net:.3g} Ang); use beta_centre='volume'.")
+        centre = w @ xyz / net
+        if _outside(centre, xyz[active]):
+            raise ValueError(
+                f'{advice}: the centroid ({_xyz_text(centre)}) Ang lies outside the points '
+                "that scatter; use beta_centre='volume'."
+            )
+        return centre
+
+    def _beta(self, structure, sld, active, centre, debye, bin_width, progress, notes):
+        """The amplitude about *centre* summed over the sizes, and β = amplitude² / *debye*.
+
+        β is nan where *debye* is below ``BETA_NOISE_FACTOR`` times its
+        estimated error: for the histogram the largest phase error of a pair
+        times Σ w² (the pair weights in quadrature), otherwise round-off.
+        *progress* is called with 1.0 after each size.
+        """
+        p, q = self._params, self._q
+        rho = p['sld_solvent'] * 1e-6
+        factors, shares = self._sizes(p)
+        xyz, volume = structure.xyz[active], structure.volume[active]
+        b = sld[active] * volume
+        w = b - rho * volume
+        radial = spectrum_radial(xyz, b, volume, centre)
+        amplitude = np.zeros(q.size)
+        for f, s in zip(factors, shares):
+            amplitude += s * f**3 * radial.amplitude(f * q, rho)
+            if progress is not None and progress(1.0):
+                raise CalculationInterrupted('Beta pass stopped by the progress callback.')
+
+        sixth = np.sum(shares * factors**6)
+        if bin_width is None:
+            noise = BETA_ROUNDOFF * np.abs(w).sum() ** 2 * sixth
+        else:
+            noise = q * factors.max() * bin_width / 2 * np.sum(w**2) * sixth
+        reliable = debye >= BETA_NOISE_FACTOR * noise
+        beta = np.full(q.size, np.nan)
+        beta[reliable] = amplitude[reliable] ** 2 / debye[reliable]
+
+        r = np.linalg.norm(xyz - centre, axis=1)
+        rms = np.sqrt(np.abs(w) @ r**2 / np.abs(w).sum())
+        choice = _centre_name(p['beta_centre'])
+        _note(
+            notes,
+            f"beta: amplitudes about ({_xyz_text(centre)}) Ang ('{choice}'); the points that "
+            f'scatter lie up to {r.max():.4g} Ang from it, rms {rms:.4g} Ang weighted by '
+            '|contrast| x volume.',
+            'info',
+        )
+        if choice == 'given' and _outside(centre, xyz):
+            _note(
+                notes,
+                'beta: the given centre lies outside the bounding box of the points that scatter.',
+            )
+        if p['normalisation_volume'] == 'auto' and not active.all():
+            _note(
+                notes,
+                f'beta: {int(np.sum(~active))} points match the solvent and normalisation_volume '
+                "is 'auto', so V_norm is the volume that scatters. A structure factor belongs to "
+                'the number density scale / V_norm; set normalisation_volume if the particle '
+                'volume differs.',
+                'info',
+            )
+        if not reliable.all():
+            unreliable = q[~reliable]
+            _note(
+                notes,
+                f'beta: {unreliable.size} of {q.size} values, at q from {unreliable[0]:.4g} to '
+                f'{unreliable[-1]:.4g} 1/Ang, are nan: D(q) there is below '
+                f'{BETA_NOISE_FACTOR:g} times its estimated error (a deep minimum, or low q '
+                'near zero net contrast).',
+            )
+        excess = np.max(beta[reliable], initial=1.0) - 1
+        if excess > BETA_EXCESS:
+            _note(
+                notes,
+                f'beta exceeds 1 by {excess:.3g}, more than the error of the kernel for P(q) '
+                "should allow; kernel='pairs' is exact.",
+            )
+        return amplitude, beta
+
     # ----------------------------------------------------------------- output
 
     def describe(self) -> None:
@@ -900,11 +1204,21 @@ class GenericScatteringCalculator:
         kwargs.setdefault('sld_solvent', self._params['sld_solvent'])
         return self._scattering_structure().plot_points(**kwargs)
 
-    def plot_profile(self, *, data=None, log_scale: bool = True, show: bool | None = None):
-        """Plot the current profile, optionally over measured *data* (a ``Data1D``)."""
+    def plot_profile(
+        self,
+        *,
+        data=None,
+        log_scale: bool = True,
+        show: bool | None = None,
+        quantity: str = 'intensity',
+    ):
+        """Plot the current profile, optionally over measured *data* (a ``Data1D``).
+
+        ``quantity='beta'`` plots β(q) instead, without *data*.
+        """
         if self._profile is None:
             raise ValueError('No current profile. Call calculate() first.')
-        return self._profile.plot(data=data, log_scale=log_scale, show=show)
+        return self._profile.plot(data=data, log_scale=log_scale, show=show, quantity=quantity)
 
     # ------------------------------------------------------------ settings
 
@@ -921,6 +1235,9 @@ class GenericScatteringCalculator:
         file) is recorded as ``'in-memory'``, which ``from_settings`` refuses;
         a derived copy also records ``derived_from``, for information only.
 
+        With ``beta`` off the record leaves out ``beta`` and ``beta_centre``,
+        so it replays on versions without them.
+
         Args:
             root: The directory to record the path relative to; None records
                 the absolute path. A file on another drive than *root* is
@@ -929,6 +1246,10 @@ class GenericScatteringCalculator:
         structure = self._require_structure()
         replayable = structure.reader_options is not None
         source = _settings_path(structure.source, root)
+        params = dict(self._params)
+        if not params['beta']:
+            for key in BETA_PARAMS:
+                del params[key]
         settings = {
             'source': source if replayable else 'in-memory',
             'basename': os.path.basename(structure.source),
@@ -936,7 +1257,7 @@ class GenericScatteringCalculator:
             'reader_options': copy.deepcopy(structure.reader_options),
             'q': self._q.tolist(),
             'q_grid': dict(self._q_args) if self._q_args else None,
-            'params': dict(self._params),
+            'params': params,
             'versions': {
                 'sinccity': __version__,
                 **{name: package_version(name) for name in ('numpy', 'periodictable')},

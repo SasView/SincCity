@@ -12,7 +12,7 @@ SCRIPTS = sorted(EXAMPLES.glob('[0-9][0-9]_*.py'))
 
 
 def test_there_are_examples():
-    assert len(SCRIPTS) >= 7
+    assert len(SCRIPTS) >= 8
 
 
 @pytest.mark.parametrize('script', SCRIPTS, ids=[script.stem for script in SCRIPTS])
